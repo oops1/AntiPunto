@@ -15,6 +15,7 @@ pub struct Stats {
     pub forced: u64,
     pub password_skips: u64,
     pub infer_us: u64,
+    pub spell_fixes: u64,
     pub by_app: BTreeMap<String, u64>,
 }
 
@@ -38,6 +39,7 @@ impl Stats {
                 "forced" => s.forced = v,
                 "password_skips" => s.password_skips = v,
                 "infer_us" => s.infer_us = v,
+                "spell_fixes" => s.spell_fixes = v,
                 k => {
                     if let Some(app) = k.strip_prefix("app.") {
                         s.by_app.insert(app.to_string(), v);
@@ -50,8 +52,8 @@ impl Stats {
 
     fn save(&self) {
         let mut out = format!(
-            "words={}\nfixes={}\nundos={}\nforced={}\npassword_skips={}\ninfer_us={}\n",
-            self.words, self.fixes, self.undos, self.forced, self.password_skips, self.infer_us
+            "words={}\nfixes={}\nundos={}\nforced={}\npassword_skips={}\ninfer_us={}\nspell_fixes={}\n",
+            self.words, self.fixes, self.undos, self.forced, self.password_skips, self.infer_us, self.spell_fixes
         );
         for (app, n) in &self.by_app {
             out += &format!("app.{app}={n}\n");

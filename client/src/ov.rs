@@ -38,10 +38,9 @@ pub struct Model {
     core: *mut c_void,
     compiled: *mut c_void,
     request: *mut c_void,
-    tensors: [*mut c_void; 3],
-    tok: *mut i32,
-    lay: *mut i32,
-    out: *const f32,
+    tensors: Vec<*mut c_void>,
+    inputs: Vec<(*mut i32, usize)>,
+    out: (*const f32, usize),
     pub device: String,
 }
 
@@ -67,8 +66,20 @@ fn check(lib: &Library, st: Status, what: &str) -> Result<(), String> {
 }
 
 impl Model {
-    /// Загрузка модели: устройства по порядку, первое удачное.
+    /// Модель раскладки: два входа [1, W], выход [1, W].
     pub fn load(ov_dir: &Path, model: &Path, devices: &[&str], cache_dir: &Path) -> Result<Model, String> {
+        Model::load_shaped(ov_dir, model, devices, cache_dir, &[W, W], W)
+    }
+
+    /// Загрузка модели: устройства по порядку, первое удачное; входы i32, выход f32.
+    pub fn load_shaped(
+        ov_dir: &Path,
+        model: &Path,
+        devices: &[&str],
+        cache_dir: &Path,
+        input_lens: &[usize],
+        output_len: usize,
+    ) -> Result<Model, String> {
         let lib = unsafe { Library::load_with_flags(ov_dir.join("openvino_c.dll"), LOAD_WITH_ALTERED_SEARCH_PATH) }
             .map_err(|e| format!("openvino_c.dll: {e}"))?;
         unsafe {
@@ -120,18 +131,25 @@ impl Model {
 
             let mut request = null_mut();
             check(&lib, create_req(compiled, &mut request), "create_infer_request")?;
-            let mut tensors = [null_mut(); 3];
-            check(&lib, get_in(request, 0, &mut tensors[0]), "input 0")?;
-            check(&lib, get_in(request, 1, &mut tensors[1]), "input 1")?;
-            check(&lib, get_out(request, 0, &mut tensors[2]), "output 0")?;
-            let mut ptrs = [null_mut(); 3];
-            for i in 0..3 {
-                let mut n = 0usize;
-                check(&lib, size(tensors[i], &mut n), "byte_size")?;
-                if n != W * 4 {
-                    return Err(format!("тензор {i}: {n} байт, ожидалось {}", W * 4));
+            let mut tensors = Vec::new();
+            let mut ptrs = Vec::new();
+            let lens: Vec<usize> = input_lens.iter().copied().chain([output_len]).collect();
+            for (i, &len) in lens.iter().enumerate() {
+                let mut t = null_mut();
+                if i < input_lens.len() {
+                    check(&lib, get_in(request, i, &mut t), "input")?;
+                } else {
+                    check(&lib, get_out(request, 0, &mut t), "output")?;
                 }
-                check(&lib, data(tensors[i], &mut ptrs[i]), "tensor_data")?;
+                tensors.push(t);
+                let mut n = 0usize;
+                check(&lib, size(t, &mut n), "byte_size")?;
+                if n != len * 4 {
+                    return Err(format!("тензор {i}: {n} байт, ожидалось {}", len * 4));
+                }
+                let mut p = null_mut();
+                check(&lib, data(t, &mut p), "tensor_data")?;
+                ptrs.push(p);
             }
 
             let mut m = Model {
@@ -145,36 +163,45 @@ impl Model {
                 compiled,
                 request,
                 tensors,
-                tok: ptrs[0].cast(),
-                lay: ptrs[1].cast(),
-                out: ptrs[2].cast(),
+                inputs: input_lens.iter().zip(&ptrs).map(|(&n, p)| (p.cast(), n)).collect(),
+                out: (ptrs[input_lens.len()].cast(), output_len),
                 device,
             };
             // прогрев: первый прогон на NPU медленный
+            let zeros: Vec<Vec<i32>> = input_lens.iter().map(|&n| vec![0; n]).collect();
+            let refs: Vec<&[i32]> = zeros.iter().map(Vec::as_slice).collect();
+            let mut out = vec![0f32; output_len];
             for _ in 0..3 {
-                m.run(&[0; W], &[0; W])?;
+                m.infer(&refs, &mut out)?;
             }
             Ok(m)
         }
     }
 
-    /// Вероятность «перевернуть» для каждой позиции окна.
-    pub fn run(&mut self, tok: &[i32; W], lay: &[i32; W]) -> Result<[f32; W], String> {
+    /// Прогон: входы по порядку, результат в out.
+    pub fn infer(&mut self, ins: &[&[i32]], out: &mut [f32]) -> Result<(), String> {
         unsafe {
-            std::ptr::copy_nonoverlapping(tok.as_ptr(), self.tok, W);
-            std::ptr::copy_nonoverlapping(lay.as_ptr(), self.lay, W);
+            for (&(p, n), src) in self.inputs.iter().zip(ins) {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), p, n.min(src.len()));
+            }
             check(&self._lib, (self.infer)(self.request), "infer")?;
-            let mut out = [0f32; W];
-            std::ptr::copy_nonoverlapping(self.out, out.as_mut_ptr(), W);
-            Ok(out)
+            std::ptr::copy_nonoverlapping(self.out.0, out.as_mut_ptr(), self.out.1.min(out.len()));
+            Ok(())
         }
+    }
+
+    /// Модель раскладки: вероятность «перевернуть» для каждой позиции окна.
+    pub fn run(&mut self, tok: &[i32; W], lay: &[i32; W]) -> Result<[f32; W], String> {
+        let mut out = [0f32; W];
+        self.infer(&[tok, lay], &mut out)?;
+        Ok(out)
     }
 }
 
 impl Drop for Model {
     fn drop(&mut self) {
         unsafe {
-            for t in self.tensors {
+            for &t in &self.tensors {
                 (self.tensor_free)(t);
             }
             (self.request_free)(self.request);

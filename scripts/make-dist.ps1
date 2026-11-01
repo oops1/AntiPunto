@@ -27,7 +27,7 @@ Remove-Item $dist -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$app\openvino", "$app\models" | Out-Null
 
 Copy-Item "$root\client\target\release\antipunto.exe" $app
-Copy-Item "$root\models\layout.xml", "$root\models\layout.bin" "$app\models"
+Copy-Item "$root\models\*" "$app\models"
 
 # только то, что нужно для IR-модели на CPU и NPU
 $dlls = @(

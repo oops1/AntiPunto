@@ -3,10 +3,17 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
+use windows::Win32::Foundation::WAIT_OBJECT_0;
+use windows::Win32::Storage::FileSystem::{
+    FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FindFirstChangeNotificationW,
+    FindNextChangeNotification,
+};
 use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::System::Threading::{INFINITE, WaitForSingleObject};
 use windows::Win32::UI::Shell::{FOLDERID_Documents, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
+use windows::core::HSTRING;
 
 pub const PROGRAMS: &str = "programs.txt";
 pub const IGNORE: &str = "ignore.txt";
@@ -55,13 +62,30 @@ pub fn norm(word: impl IntoIterator<Item = char>) -> String {
     word.into_iter().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
+/// Папка изменилась: перечитать при следующем нажатии.
+static DIRTY: AtomicBool = AtomicBool::new(true);
+
+/// Сторож папки: спит в ядре, Windows будит его только при записи в неё.
+pub fn watch() {
+    std::thread::spawn(|| unsafe {
+        ensure_files();
+        let d = HSTRING::from(dir().as_os_str());
+        let filter = FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME;
+        let Ok(h) = FindFirstChangeNotificationW(&d, false, filter) else { return };
+        while WaitForSingleObject(h, INFINITE) == WAIT_OBJECT_0 {
+            DIRTY.store(true, SeqCst);
+            if FindNextChangeNotification(h).is_err() {
+                break;
+            }
+        }
+    });
+}
+
 #[derive(Default)]
 pub struct Lists {
     pub programs: HashSet<String>,
     pub ignore: HashSet<String>,
     pub force: HashSet<String>,
-    stamps: [Option<SystemTime>; 3],
-    checked: Option<Instant>,
 }
 
 fn read(name: &str, f: impl Fn(&str) -> String) -> HashSet<String> {
@@ -76,17 +100,11 @@ fn read(name: &str, f: impl Fn(&str) -> String) -> HashSet<String> {
 }
 
 impl Lists {
-    /// Перечитать файлы, если изменились; не чаще раза в 2 с.
+    /// Перечитать, только если сторож видел изменения; иначе — одно чтение флага.
     pub fn refresh(&mut self) {
-        if self.checked.is_some_and(|t| t.elapsed().as_secs() < 2) {
+        if !DIRTY.swap(false, SeqCst) {
             return;
         }
-        self.checked = Some(Instant::now());
-        let stamps = [PROGRAMS, IGNORE, FORCE].map(|n| std::fs::metadata(path(n)).and_then(|m| m.modified()).ok());
-        if stamps == self.stamps {
-            return;
-        }
-        self.stamps = stamps;
         self.programs = read(PROGRAMS, str::to_lowercase);
         self.ignore = read(IGNORE, |l| norm(l.chars()));
         self.force = read(FORCE, |l| norm(l.chars()));

@@ -12,6 +12,10 @@ public static class KB {
     var i = new IN[1]; i[0].type = 1; i[0].ki.scan = sc; i[0].ki.flags = 0x0008u | (up ? 2u : 0u);
     SendInput(1, i, Marshal.SizeOf(typeof(IN)));
   }
+  public static void Vk(ushort vk) {
+    var i = new IN[2]; i[0].type = 1; i[0].ki.vk = vk; i[1].type = 1; i[1].ki.vk = vk; i[1].ki.flags = 2u;
+    SendInput(2, i, Marshal.SizeOf(typeof(IN)));
+  }
 }
 "@
 
@@ -30,15 +34,27 @@ foreach ($r in $rows) {
 }
 $map[" "] = @(0x39, $false)
 
-# физические клавиши, как на английской раскладке
-$steps = @("ghbdtn rfr ltkf ", "z d rehct ", "hello world ")
-$expect = "привет как дела я в курсе hello world "
+# Поля по очереди, переход клавишей Tab. Набор — физические клавиши как на EN.
+# 1) раскладка по смыслу; 2) Pause сразу после правки — отмена;
+# 3) Pause на верном слове — принудительно; 4) поле пароля — не трогать (там уже RU после п.3).
+$fields = @(
+    @{ steps = @("ghbdtn rfr ltkf ", "z d rehct ", "hello world "); expect = "привет как дела я в курсе hello world " },
+    @{ steps = @("ghbdtn ", "{PAUSE}"); expect = "ghbdtn " },
+    @{ steps = @("hello ", "{PAUSE}"); expect = "руддщ " },
+    @{ steps = @("hello "); expect = "руддщ "; password = $true }
+)
 
 $form = New-Object Windows.Forms.Form
-$form.Text = "AntiPunto autotest"; $form.Width = 720; $form.Height = 200; $form.TopMost = $true
-$box = New-Object Windows.Forms.TextBox
-$box.Multiline = $true; $box.Dock = "Fill"; $box.Font = New-Object Drawing.Font("Segoe UI", 14)
-$form.Controls.Add($box)
+$form.Text = "AntiPunto autotest"; $form.Width = 720; $form.Height = 320; $form.TopMost = $true
+$boxes = @()
+for ($i = $fields.Count - 1; $i -ge 0; $i--) {
+    $b = New-Object Windows.Forms.TextBox
+    $b.Dock = "Top"; $b.Font = New-Object Drawing.Font("Segoe UI", 14); $b.TabIndex = $i
+    if ($fields[$i].password) { $b.UseSystemPasswordChar = $true }
+    $form.Controls.Add($b)
+    $boxes = , $b + $boxes
+}
+$box = $boxes[0]
 
 $script:queue = New-Object System.Collections.Queue
 $timer = New-Object Windows.Forms.Timer
@@ -47,7 +63,14 @@ $form.Add_Shown({
   $form.Activate(); $box.Focus()
   [Windows.Forms.InputLanguage]::CurrentInputLanguage = [Windows.Forms.InputLanguage]::FromCulture([Globalization.CultureInfo]::GetCultureInfo("en-US"))
   $script:queue.Enqueue("wait:600")
-  foreach ($s in $steps) { foreach ($c in $s.ToCharArray()) { $script:queue.Enqueue([string]$c) }; $script:queue.Enqueue("wait:500") }
+  for ($f = 0; $f -lt $fields.Count; $f++) {
+    if ($f -gt 0) { $script:queue.Enqueue("{TAB}"); $script:queue.Enqueue("wait:400") }
+    foreach ($s in $fields[$f].steps) {
+      if ($s -like "{*}") { $script:queue.Enqueue($s) }
+      else { foreach ($c in $s.ToCharArray()) { $script:queue.Enqueue([string]$c) } }
+      $script:queue.Enqueue("wait:500")
+    }
+  }
   $script:queue.Enqueue("done")
   $timer.Start()
 })
@@ -59,11 +82,17 @@ $timer.Add_Tick({
   if ($item -like "wait:*") { $script:waitUntil = [DateTime]::Now.AddMilliseconds([int]$item.Substring(5)); return }
   if ($item -eq "done") {
     $timer.Stop()
-    $got = $box.Text
-    $ok = $got -eq $expect
-    "ожидалось: [$expect]`nполучено:  [$got]`nсовпало: $ok" | Out-File -FilePath $Out -Encoding utf8
+    $lines = @(); $all = $true
+    for ($f = 0; $f -lt $fields.Count; $f++) {
+      $got = $boxes[$f].Text; $ok = $got -eq $fields[$f].expect; $all = $all -and $ok
+      $lines += "поле $($f + 1): ожидалось [$($fields[$f].expect)] получено [$got] $(if ($ok) { 'ok' } else { 'ОШИБКА' })"
+    }
+    $lines += "совпало: $all"
+    $lines -join "`n" | Out-File -FilePath $Out -Encoding utf8
     $form.Close(); return
   }
+  if ($item -eq "{PAUSE}") { [KB]::Vk(0x13); return }
+  if ($item -eq "{TAB}") { [KB]::Scan(0x0F, $false); [KB]::Scan(0x0F, $true); return }
   $k = $map[$item]
   if ($k[1]) { [KB]::Scan(0x2A, $false) }
   [KB]::Scan([uint16]$k[0], $false); [KB]::Scan([uint16]$k[0], $true)

@@ -9,14 +9,15 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NIN_BALLOONUSERCLICK,
-    NOTIFYICONDATAW, Shell_NotifyIconW,
+    NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 use crate::hook::{ENABLED, Event, SENDER, foreground_layout};
 use crate::keymap::{EN, RU};
-use crate::update;
+use crate::worker::LAST_APP;
+use crate::{autostart, lists, update};
 
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_FENCE: u32 = WM_APP + 2;
@@ -24,6 +25,11 @@ const WM_NOTIFY_USER: u32 = WM_APP + 3;
 const ID_TOGGLE: usize = 1;
 const ID_CHECK: usize = 2;
 const ID_UPDATE: usize = 3;
+const ID_AUTOSTART: usize = 4;
+const ID_SKIP_APP: usize = 5;
+const ID_LIST_PROGRAMS: usize = 6;
+const ID_LIST_IGNORE: usize = 7;
+const ID_LIST_FORCE: usize = 8;
 const ID_EXIT: usize = 9;
 
 pub static READY: AtomicBool = AtomicBool::new(false);
@@ -187,6 +193,20 @@ fn menu(hwnd: HWND) {
         let status: Vec<u16> = STATUS.lock().unwrap().encode_utf16().chain([0]).collect();
         let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
+        let app = LAST_APP.lock().unwrap().clone();
+        if !app.is_empty() {
+            let label = wide(&format!("Не исправлять в {app}"));
+            let _ = AppendMenuW(m, MF_STRING, ID_SKIP_APP, PCWSTR(label.as_ptr()));
+        }
+        if let Ok(sub) = CreatePopupMenu() {
+            let _ = AppendMenuW(sub, MF_STRING, ID_LIST_PROGRAMS, w!("Программы-исключения…"));
+            let _ = AppendMenuW(sub, MF_STRING, ID_LIST_IGNORE, w!("Слова, которые не трогать…"));
+            let _ = AppendMenuW(sub, MF_STRING, ID_LIST_FORCE, w!("Жёсткие слова…"));
+            let _ = AppendMenuW(m, MF_STRING | MF_POPUP, sub.0 as usize, w!("Списки"));
+        }
+        let auto = if autostart::enabled() { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(m, MF_STRING | auto, ID_AUTOSTART, w!("Запускать при входе в Windows"));
+        let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let avail = update::AVAILABLE.lock().unwrap().as_ref().map(|r| r.version.clone());
         let label: Vec<u16> = match &avail {
             Some(v) => format!("Установить версию {v}"),
@@ -203,6 +223,24 @@ fn menu(hwnd: HWND) {
         let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, None, hwnd, None);
         let _ = DestroyMenu(m);
+    }
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
+}
+
+/// Открыть файл списка как двойным кликом; программа подхватит правку сама.
+fn open_list(name: &str) {
+    lists::ensure_files();
+    let path = HSTRING::from(lists::path(name).as_os_str());
+    let dir = HSTRING::from(lists::dir().as_os_str());
+    unsafe {
+        let h = ShellExecuteW(None, w!("open"), &path, PCWSTR::null(), &dir, SW_SHOWNORMAL);
+        if (h.0 as isize) <= 32 {
+            // нет ассоциации для .txt — явный Блокнот
+            ShellExecuteW(None, w!("open"), w!("notepad.exe"), &path, &dir, SW_SHOWNORMAL);
+        }
     }
 }
 
@@ -238,6 +276,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                         std::thread::spawn(|| check_updates(true));
                     }
                     ID_UPDATE => start_install(hwnd),
+                    ID_AUTOSTART => autostart::set(!autostart::enabled()),
+                    ID_SKIP_APP => {
+                        let app = LAST_APP.lock().unwrap().clone();
+                        match lists::add_program(&app) {
+                            Ok(()) => notify("AntiPunto", format!("{app} добавлена в исключения")),
+                            Err(e) => notify("AntiPunto", format!("Не удалось записать список: {e}")),
+                        }
+                    }
+                    ID_LIST_PROGRAMS => open_list(lists::PROGRAMS),
+                    ID_LIST_IGNORE => open_list(lists::IGNORE),
+                    ID_LIST_FORCE => open_list(lists::FORCE),
                     ID_EXIT => {
                         let _ = DestroyWindow(hwnd);
                     }

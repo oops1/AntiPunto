@@ -1,6 +1,7 @@
 //! Буфер текущего набора и решения модели.
 
 use crate::keymap::{KEYMAP, OTHER, PAD, SPACE};
+use crate::lists::{Lists, norm};
 use crate::ov::{Model, W};
 
 const MAX_LEN: usize = 256;
@@ -65,13 +66,14 @@ pub struct Fix {
 }
 
 /// Слово по началу: вероятность на своей границе и была ли правка.
+#[derive(Clone)]
 struct Seen {
     start: usize,
     first_p: f32,
     done: bool,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Buffer {
     pub chars: Vec<Ch>,
     seen: Vec<Seen>,
@@ -162,7 +164,7 @@ impl Buffer {
     }
 
     /// Прогон модели по окну, кончающемуся последним словом.
-    pub fn plan(&mut self, model: &mut Model, threshold: f32) -> Result<Option<Plan>, String> {
+    pub fn plan(&mut self, model: &mut Model, threshold: f32, lists: &Lists) -> Result<Option<Plan>, String> {
         let mut end = self.chars.len();
         while end > 0 && self.chars[end - 1].tok == SPACE {
             end -= 1;
@@ -194,9 +196,15 @@ impl Buffer {
                 }
             };
             let core = (a..b).find(|&i| !KEYMAP.neutral(self.chars[i].tok)).unwrap_or(a);
-            let want = self.chars[core].typed ^ (pm > threshold) as u8;
-            let keep = n <= SHORT && real_short_word(&self.chars[a..b]);
-            if allowed && !keep && want != self.chars[core].lay {
+            let lay = self.chars[core].lay;
+            let shown = norm(self.chars[a..b].iter().map(Ch::render));
+            let other = norm(self.chars[a..b].iter().map(|c| Ch { lay: 1 - c.lay, ..*c }.render()));
+            let mut want = self.chars[core].typed ^ (pm > threshold) as u8;
+            if lists.force.contains(&other) {
+                want = 1 - lay;
+            }
+            let keep = lists.ignore.contains(&shown) || (n <= SHORT && real_short_word(&self.chars[a..b]));
+            if allowed && !keep && want != lay {
                 flips.push((a, b, want));
             }
         }
@@ -222,6 +230,31 @@ impl Buffer {
             .collect())
     }
 
+    /// Решение пользователя: слова в буфере больше не трогать.
+    pub fn freeze(&mut self) {
+        let end = self.chars.len();
+        for (a, _) in self.spans(end) {
+            match self.seen.iter_mut().find(|w| w.start == a) {
+                Some(w) => w.done = true,
+                None => self.seen.push(Seen { start: a, first_p: 0.0, done: true }),
+            }
+        }
+    }
+
+    /// Pause/Break: перевернуть последнее слово, что бы ни думала модель.
+    pub fn flip_last(&mut self) -> Option<Fix> {
+        let mut end = self.chars.len();
+        while end > 0 && self.chars[end - 1].tok == SPACE {
+            end -= 1;
+        }
+        let (a, b) = *self.spans(end).last()?;
+        let core = (a..b).find(|&i| !KEYMAP.neutral(self.chars[i].tok)).unwrap_or(a);
+        let want = 1 - self.chars[core].lay;
+        let fix = self.apply(Plan { flips: vec![(a, b, want)], first: a, end: b });
+        self.freeze();
+        Some(fix)
+    }
+
     /// Применить план; набранное после слова идёт в новой раскладке.
     pub fn apply(&mut self, plan: Plan) -> Fix {
         let old: String = self.chars[plan.first..].iter().map(Ch::render).collect();
@@ -242,5 +275,44 @@ impl Buffer {
         }
         let text: String = self.chars[plan.first..].iter().map(Ch::render).collect();
         Fix { erase: self.chars.len() - plan.first, text, old, new_lay, last_flipped }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keymap::{EN, RU};
+
+    fn typed(text: &str, lay: u8) -> Buffer {
+        let mut b = Buffer::default();
+        for c in text.chars() {
+            let tok = if c == ' ' { SPACE } else { KEYMAP.token_of(c, lay).unwrap() };
+            b.push(Ch::new(tok, lay, c));
+        }
+        b
+    }
+
+    #[test]
+    fn flip_last_word() {
+        let mut b = typed("ghbdtn ", EN);
+        let fix = b.flip_last().unwrap();
+        assert_eq!((fix.erase, fix.text.as_str(), fix.new_lay), (7, "привет ", RU));
+        // повторно модель это слово не тронет
+        assert!(b.seen.iter().all(|w| w.done));
+    }
+
+    #[test]
+    fn flip_last_skips_trailing_spaces_and_keeps_earlier_words() {
+        let mut b = typed("ok hello  ", EN);
+        let fix = b.flip_last().unwrap();
+        assert_eq!(fix.text, "руддщ  ");
+        assert_eq!(fix.erase, 7);
+    }
+
+    #[test]
+    fn real_short_words() {
+        assert!(real_short_word(&typed("на", RU).chars));
+        assert!(real_short_word(&typed("is", EN).chars));
+        assert!(!real_short_word(&typed("yf", EN).chars));
     }
 }

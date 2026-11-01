@@ -1,6 +1,7 @@
 //! Рабочий поток: буфер, модель, исправления.
 
 use std::collections::VecDeque;
+use std::sync::Mutex;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::mpsc::Receiver;
 
@@ -13,9 +14,12 @@ use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::core::PWSTR;
 
 use crate::engine::{Buffer, Ch};
+use crate::focus::Focus;
 use crate::hook::{CORRECTING, Event, HAS_WORD, Key, is_modifier};
 use crate::keymap::{KEYMAP, OTHER, SPACE};
+use crate::lists::{self, Lists};
 use crate::ov::Model;
+use crate::stats::{Saver, Stats};
 use crate::tray::{READY, fence, set_status};
 use crate::{Config, input, load_model};
 
@@ -40,9 +44,19 @@ impl Mods {
     }
 }
 
+/// Последняя автоправка: Pause возвращает как было.
+struct Undo {
+    before: Buffer,
+    text: String,
+    old: String,
+    old_lay: u8,
+}
+
 struct Worker {
     cfg: Config,
     model: Model,
+    focus: Focus,
+    lists: Lists,
     buf: Buffer,
     mods: Mods,
     caps: bool,
@@ -50,7 +64,12 @@ struct Worker {
     proc_name: String,
     excluded: bool,
     target_lay: Option<u8>,
+    undo: Option<Undo>,
+    stats: Stats,
 }
+
+/// Программа, где печатали последней: для пункта меню «не исправлять здесь».
+pub static LAST_APP: Mutex<String> = Mutex::new(String::new());
 
 fn process_name(hwnd: isize) -> String {
     unsafe {
@@ -124,12 +143,15 @@ impl Worker {
         if k.up {
             return;
         }
+        self.lists.refresh();
         if k.hwnd != self.hwnd {
             self.hwnd = k.hwnd;
             self.buf.clear();
+            self.undo = None;
             self.proc_name = process_name(k.hwnd);
-            self.excluded = self.cfg.exclude.contains(&self.proc_name);
+            *LAST_APP.lock().unwrap() = self.proc_name.clone();
         }
+        self.excluded = self.cfg.exclude.contains(&self.proc_name) || self.lists.programs.contains(&self.proc_name);
         if k.deferred {
             self.replay(k, rx, pending);
         } else {
@@ -142,11 +164,17 @@ impl Worker {
         self.target_lay = None;
         let Some(lay) = k.lay.filter(|_| !self.excluded && !self.mods.command()) else {
             self.buf.clear();
+            self.undo = None;
             if k.boundary {
                 input::tap(k.vk, k.scan, k.ext);
             }
             return;
         };
+        if k.vk == VK_PAUSE.0 {
+            self.pause();
+            return;
+        }
+        self.undo = None;
         match VIRTUAL_KEY(k.vk) {
             VK_BACK => self.buf.pop(),
             VK_SPACE => {
@@ -167,8 +195,42 @@ impl Worker {
         }
     }
 
+    /// Pause/Break: отменить последнюю правку или перевернуть последнее слово.
+    fn pause(&mut self) {
+        if let Some(u) = self.undo.take() {
+            if input::replace(u.text.chars().count(), &u.old) {
+                self.buf = u.before;
+                self.buf.freeze();
+                input::switch_layout(u.old_lay);
+                self.stats.undos += 1;
+                if self.cfg.debug {
+                    println!("отмена: «{}» → «{}»", u.text, u.old);
+                }
+            } else {
+                self.buf.clear();
+            }
+            return;
+        }
+        if self.focus.is_password() {
+            return;
+        }
+        if let Some(fix) = self.buf.flip_last() {
+            if input::replace(fix.erase, &fix.text) {
+                input::switch_layout(fix.new_lay);
+                self.target_lay = Some(fix.new_lay);
+                self.stats.forced += 1;
+                if self.cfg.debug {
+                    println!("вручную: «{}» → «{}»", fix.old, fix.text);
+                }
+            } else {
+                self.buf.clear();
+            }
+        }
+    }
+
     /// Нажатие проглочено во время правки: напечатать заново.
     fn replay(&mut self, k: Key, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+        self.undo = None;
         let lay = self.target_lay.or(k.lay);
         let printable =
             k.vk == VK_SPACE.0 || numpad_char(k.vk).is_some() || (!k.ext && KEYMAP.key_index(k.scan).is_some());
@@ -190,6 +252,16 @@ impl Worker {
     }
 
     fn correct(&mut self, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+        // пароль: не смотреть и не трогать
+        if self.focus.is_password() {
+            self.buf.clear();
+            self.stats.password_skips += 1;
+            if self.cfg.debug {
+                println!("  [{}] поле пароля — пропуск", self.proc_name);
+            }
+            return;
+        }
+        self.stats.words += 1;
         if self.cfg.debug {
             let lay = self
                 .buf
@@ -203,7 +275,10 @@ impl Worker {
                 println!("  [{} {lay}] {}", self.proc_name, w.join(" "));
             }
         }
-        let plan = match self.buf.plan(&mut self.model, self.cfg.threshold) {
+        let t = std::time::Instant::now();
+        let plan = self.buf.plan(&mut self.model, self.cfg.threshold, &self.lists);
+        self.stats.infer_us += t.elapsed().as_micros() as u64;
+        let plan = match plan {
             Ok(Some(p)) => p,
             Ok(None) => return,
             Err(e) => {
@@ -235,12 +310,19 @@ impl Worker {
             }
         }
         if after.is_empty() {
+            let before = self.buf.clone();
+            let old_lay = before.chars.iter().rev().find(|c| !KEYMAP.neutral(c.tok)).map_or(0, |c| c.lay);
             let fix = self.buf.apply(plan);
             if !input::replace(fix.erase, &fix.text) {
                 self.buf.clear();
-            } else if fix.last_flipped {
-                input::switch_layout(fix.new_lay);
-                self.target_lay = Some(fix.new_lay);
+            } else {
+                self.stats.fixes += 1;
+                *self.stats.by_app.entry(self.proc_name.clone()).or_default() += 1;
+                self.undo = Some(Undo { before, text: fix.text.clone(), old: fix.old.clone(), old_lay });
+                if fix.last_flipped {
+                    input::switch_layout(fix.new_lay);
+                    self.target_lay = Some(fix.new_lay);
+                }
             }
             if self.cfg.debug {
                 println!("«{}» → «{}»", fix.old, fix.text);
@@ -268,9 +350,16 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         println!("модель на {} за {:?}", model.device, t0.elapsed());
     }
     READY.store(true, SeqCst);
+    lists::ensure_files();
+    let mut lists = Lists::default();
+    lists.refresh();
+    let stats = Stats::load();
+    let mut saver = Saver::new(&stats);
     let mut w = Worker {
         cfg,
         model,
+        focus: Focus::new(),
+        lists,
         buf: Buffer::default(),
         mods: Mods::default(),
         caps,
@@ -278,6 +367,8 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         proc_name: String::new(),
         excluded: false,
         target_lay: None,
+        undo: None,
+        stats,
     };
     let mut pending = VecDeque::new();
     loop {
@@ -290,5 +381,6 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         };
         w.handle(ev, &rx, &mut pending);
         HAS_WORD.store(w.buf.has_word() && !w.excluded, SeqCst);
+        saver.tick(&w.stats);
     }
 }

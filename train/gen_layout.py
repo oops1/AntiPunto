@@ -68,7 +68,7 @@ def glossary(src: str) -> tuple[list[str], list[float]]:
     """Термины из build_glossary.py с накопленными весами по частоте."""
     if not _GLOSSARY:
         terms: dict[str, list[tuple[str, float]]] = {"mined": [], "tags": []}
-        path = CORPUS / "glossary.tsv"
+        path = CORPUS / os.environ.get("ANTIPUNTO_GLOSSARY", "glossary.tsv")
         if path.exists():
             for line in path.read_text(encoding="utf-8").splitlines():
                 s, t, n = line.split("\t")
@@ -262,10 +262,10 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--procs", type=int, default=14)
     ap.add_argument("--sources", default="wiki,chat")
-    ap.add_argument("--glossary", action="store_true", help="термины из build_glossary.py (эксперимент v4)")
+    ap.add_argument("--glossary", nargs="?", const="glossary.tsv", help="файл терминов из build_glossary.py")
     a = ap.parse_args()
     if a.glossary:
-        os.environ["ANTIPUNTO_GLOSSARY"] = "1"  # наследуют процессы пула
+        os.environ["ANTIPUNTO_GLOSSARY"] = a.glossary  # наследуют процессы пула
 
     ru, en = load(a.split, a.sources.split(","))
     rng = random.Random(a.seed)

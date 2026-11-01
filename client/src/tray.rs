@@ -230,12 +230,17 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
 }
 
-/// Открыть файл списка в Блокноте; программа подхватит правку сама.
+/// Открыть файл списка как двойным кликом; программа подхватит правку сама.
 fn open_list(name: &str) {
     lists::ensure_files();
     let path = HSTRING::from(lists::path(name).as_os_str());
+    let dir = HSTRING::from(lists::dir().as_os_str());
     unsafe {
-        ShellExecuteW(None, w!("open"), w!("notepad.exe"), &path, PCWSTR::null(), SW_SHOWNORMAL);
+        let h = ShellExecuteW(None, w!("open"), &path, PCWSTR::null(), &dir, SW_SHOWNORMAL);
+        if (h.0 as isize) <= 32 {
+            // нет ассоциации для .txt — явный Блокнот
+            ShellExecuteW(None, w!("open"), w!("notepad.exe"), &path, &dir, SW_SHOWNORMAL);
+        }
     }
 }
 

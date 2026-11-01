@@ -73,7 +73,38 @@ def se_tags() -> Counter:
     return out
 
 
+def common_english(top: int = 20000, limit_lines: int = 1_000_000) -> set[str]:
+    """Частые английские слова: их в словарь терминов не берём."""
+    cnt = Counter()
+    for name in ("en.train.txt", "chat_en.train.txt"):
+        with open(CORPUS / name, encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i >= limit_lines:
+                    break
+                cnt.update(re.findall(r"[a-z]+", line.lower()))
+    return {w for w, _ in cnt.most_common(top)}
+
+
+def is_term(t: str, common: set[str]) -> bool:
+    """Термин, а не обычное слово: цифры, iPhone/GitHub, аббревиатура или редкое слово."""
+    if any(c.isdigit() for c in t) or any(c in t for c in "+#._"):
+        return True
+    words = t.split()
+    if any(any(c.isupper() for c in w[1:]) for w in words):
+        return True
+    if t.isupper() and 2 <= len(t) <= 6:
+        return True
+    return not all(w.lower() in common for w in words)
+
+
 if __name__ == "__main__":
+    if "--clean" in sys.argv:
+        common = common_english()
+        rows = [l.split("\t") for l in OUT.read_text(encoding="utf-8").splitlines()]
+        kept = [r for r in rows if is_term(r[1], common)]
+        (CORPUS / "glossary_clean.tsv").write_text("".join("\t".join(r) + "\n" for r in kept), encoding="utf-8")
+        print(f"очищено: {len(rows)} -> {len(kept)}")
+        sys.exit()
     mined = mine()
     print(f"из корпусов: {len(mined)}", flush=True)
     tags = se_tags() if "--no-tags" not in sys.argv else Counter()

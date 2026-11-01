@@ -1,10 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autostart;
 mod engine;
+mod focus;
 mod hook;
 mod input;
 mod keymap;
+mod lists;
 mod ov;
+mod stats;
 mod tray;
 mod update;
 mod worker;
@@ -113,7 +117,7 @@ fn selftest(c: &Config, text: &str) -> Result<(), String> {
                 println!("    {}", w.iter().map(|(w, p)| format!("{w}={p:.2}")).collect::<Vec<_>>().join(" "));
             }
             let t = std::time::Instant::now();
-            let plan = buf.plan(&mut model, c.threshold)?;
+            let plan = buf.plan(&mut model, c.threshold, &lists::Lists::default())?;
             runs.push(t.elapsed());
             if let Some(p) = plan {
                 let f = buf.apply(p);

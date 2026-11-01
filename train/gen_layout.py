@@ -3,6 +3,7 @@
 import argparse
 import math
 import multiprocessing as mp
+import os
 import random
 import re
 import string
@@ -82,6 +83,11 @@ def glossary(src: str) -> tuple[list[str], list[float]]:
 
 
 def tech(rng: random.Random) -> str:
+    # словарь (v4) пока хуже по английскому в русской раскладке
+    if not os.environ.get("ANTIPUNTO_GLOSSARY"):
+        t = rng.choice(TECH)
+        r = rng.random()
+        return t.lower() if r < 0.7 else t if r < 0.9 else t.capitalize()
     r = rng.random()
     src = "curated" if r < 0.25 else "mined" if r < 0.65 else "tags"
     terms, cum = glossary(src) if src != "curated" else ([], [])
@@ -256,7 +262,10 @@ if __name__ == "__main__":
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--procs", type=int, default=14)
     ap.add_argument("--sources", default="wiki,chat")
+    ap.add_argument("--glossary", action="store_true", help="термины из build_glossary.py (эксперимент v4)")
     a = ap.parse_args()
+    if a.glossary:
+        os.environ["ANTIPUNTO_GLOSSARY"] = "1"  # наследуют процессы пула
 
     ru, en = load(a.split, a.sources.split(","))
     rng = random.Random(a.seed)

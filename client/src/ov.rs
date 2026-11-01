@@ -89,15 +89,19 @@ impl Model {
 
             let wpath: Vec<u16> = model.as_os_str().encode_wide().chain([0]).collect();
             let cache = CString::new(cache_dir.to_string_lossy().as_bytes()).unwrap();
-            let props = [
-                Property { key: c"CACHE_DIR".as_ptr(), value: cache.as_ptr().cast() },
-                Property { key: c"PERFORMANCE_HINT".as_ptr(), value: c"LATENCY".as_ptr().cast() },
-            ];
             let mut compiled = null_mut();
             let mut device = String::new();
             let mut errors = Vec::new();
             for dev in devices {
                 let d = CString::new(*dev).unwrap();
+                let mut props = vec![
+                    Property { key: c"CACHE_DIR".as_ptr(), value: cache.as_ptr().cast() },
+                    Property { key: c"PERFORMANCE_HINT".as_ptr(), value: c"LATENCY".as_ptr().cast() },
+                ];
+                // без bf16/f16 на CPU: одинаковые решения на любой машине
+                if *dev == "CPU" {
+                    props.push(Property { key: c"INFERENCE_PRECISION_HINT".as_ptr(), value: c"f32".as_ptr().cast() });
+                }
                 match check(
                     &lib,
                     compile(core, wpath.as_ptr(), d.as_ptr(), props.len(), props.as_ptr(), &mut compiled),

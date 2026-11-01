@@ -26,9 +26,11 @@ class Probs(torch.nn.Module):
 
 
 if __name__ == "__main__":
+    ckpt = Path(sys.argv[1]) if len(sys.argv) > 1 else DATA / "layout.pt"
+    name = sys.argv[2] if len(sys.argv) > 2 else "layout"
     torch.backends.mha.set_fastpath_enabled(False)
     net = LayoutNet().eval()
-    net.load_state_dict(torch.load(DATA / "layout.pt", map_location="cpu"))
+    net.load_state_dict(torch.load(ckpt, map_location="cpu"))
     wrap = Probs(net).eval()
 
     d = np.load(DATA / "valid.npz")
@@ -39,15 +41,15 @@ if __name__ == "__main__":
 
     ex = (torch.zeros(1, W, dtype=torch.int32), torch.zeros(1, W, dtype=torch.int32))
     ovm = ov.convert_model(wrap, example_input=ex, input=[([1, W], ov.Type.i32), ([1, W], ov.Type.i32)])
-    ov.save_model(ovm, DATA / "layout.xml", compress_to_fp16=True)
-    size = (DATA / "layout.bin").stat().st_size / 1e6
-    print(f"IR: {DATA / 'layout.xml'}, веса {size:.2f} МБ")
+    ov.save_model(ovm, DATA / f"{name}.xml", compress_to_fp16=True)
+    size = (DATA / f"{name}.bin").stat().st_size / 1e6
+    print(f"IR: {DATA / f'{name}.xml'}, веса {size:.2f} МБ")
 
     core = ov.Core()
     core.set_property({"CACHE_DIR": str(DATA / "ovcache")})
     for dev in ("CPU", "NPU"):
         t = time.perf_counter()
-        cm = core.compile_model(DATA / "layout.xml", dev, {"PERFORMANCE_HINT": "LATENCY"})
+        cm = core.compile_model(DATA / f"{name}.xml", dev, {"PERFORMANCE_HINT": "LATENCY"})
         comp = time.perf_counter() - t
         req = cm.create_infer_request()
         out = np.stack([req.infer([tok[i : i + 1], lay[i : i + 1]])[0][0] for i in range(len(tok))])

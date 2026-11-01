@@ -1,0 +1,294 @@
+//! Рабочий поток: буфер, модель, исправления.
+
+use std::collections::VecDeque;
+use std::sync::atomic::Ordering::SeqCst;
+use std::sync::mpsc::Receiver;
+
+use windows::Win32::Foundation::{CloseHandle, HWND};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+use windows::core::PWSTR;
+
+use crate::engine::{Buffer, Ch};
+use crate::hook::{CORRECTING, Event, HAS_WORD, Key, is_modifier};
+use crate::keymap::{KEYMAP, OTHER, SPACE};
+use crate::ov::Model;
+use crate::tray::{READY, fence, set_status};
+use crate::{Config, input, load_model};
+
+#[derive(Default)]
+struct Mods {
+    shift_l: bool,
+    shift_r: bool,
+    ctrl_l: bool,
+    ctrl_r: bool,
+    alt_l: bool,
+    alt_r: bool,
+    win_l: bool,
+    win_r: bool,
+}
+
+impl Mods {
+    fn shift(&self) -> bool {
+        self.shift_l || self.shift_r
+    }
+    fn command(&self) -> bool {
+        self.ctrl_l || self.ctrl_r || self.alt_l || self.alt_r || self.win_l || self.win_r
+    }
+}
+
+struct Worker {
+    cfg: Config,
+    model: Model,
+    buf: Buffer,
+    mods: Mods,
+    caps: bool,
+    hwnd: isize,
+    proc_name: String,
+    excluded: bool,
+    target_lay: Option<u8>,
+}
+
+fn process_name(hwnd: isize) -> String {
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(HWND(hwnd as *mut _), Some(&mut pid));
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return String::new() };
+        let mut buf = [0u16; 512];
+        let mut n = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut n).is_ok();
+        let _ = CloseHandle(h);
+        if !ok {
+            return String::new();
+        }
+        let path = String::from_utf16_lossy(&buf[..n as usize]);
+        path.rsplit('\\').next().unwrap_or_default().to_lowercase()
+    }
+}
+
+fn numpad_char(vk: u16) -> Option<char> {
+    match VIRTUAL_KEY(vk) {
+        v if (VK_NUMPAD0.0..=VK_NUMPAD9.0).contains(&v.0) => char::from_digit((v.0 - VK_NUMPAD0.0) as u32, 10),
+        VK_MULTIPLY => Some('*'),
+        VK_ADD => Some('+'),
+        VK_SUBTRACT => Some('-'),
+        VK_DIVIDE => Some('/'),
+        _ => None,
+    }
+}
+
+impl Worker {
+    fn modifier(&mut self, k: &Key) {
+        let down = !k.up;
+        match VIRTUAL_KEY(k.vk) {
+            VK_LSHIFT => self.mods.shift_l = down,
+            VK_RSHIFT => self.mods.shift_r = down,
+            VK_LCONTROL => self.mods.ctrl_l = down,
+            VK_RCONTROL => self.mods.ctrl_r = down,
+            VK_LMENU => self.mods.alt_l = down,
+            VK_RMENU => self.mods.alt_r = down,
+            VK_LWIN => self.mods.win_l = down,
+            VK_RWIN => self.mods.win_r = down,
+            VK_CAPITAL if down => self.caps = !self.caps,
+            _ => {}
+        }
+    }
+
+    /// Символ печатной клавиши в раскладке lay.
+    fn char_of(&self, k: &Key, lay: u8) -> Option<Ch> {
+        if let Some(raw) = numpad_char(k.vk) {
+            return Some(Ch::new(OTHER, lay, raw));
+        }
+        if k.ext {
+            return None;
+        }
+        let idx = KEYMAP.key_index(k.scan)?;
+        Some(Ch::new(KEYMAP.token(idx, self.mods.shift(), self.caps, lay), lay, '\0'))
+    }
+
+    fn handle(&mut self, ev: Event, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+        let k = match ev {
+            Event::Mouse => {
+                self.buf.clear();
+                return;
+            }
+            Event::Key(k) => k,
+        };
+        if is_modifier(k.vk) {
+            self.modifier(&k);
+            return;
+        }
+        if k.up {
+            return;
+        }
+        if k.hwnd != self.hwnd {
+            self.hwnd = k.hwnd;
+            self.buf.clear();
+            self.proc_name = process_name(k.hwnd);
+            self.excluded = self.cfg.exclude.contains(&self.proc_name);
+        }
+        if k.deferred {
+            self.replay(k, rx, pending);
+        } else {
+            self.typed(k, rx, pending);
+        }
+    }
+
+    /// Клавиша уже дошла до приложения (или Enter/Tab на проверке).
+    fn typed(&mut self, k: Key, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+        self.target_lay = None;
+        let Some(lay) = k.lay.filter(|_| !self.excluded && !self.mods.command()) else {
+            self.buf.clear();
+            if k.boundary {
+                input::tap(k.vk, k.scan, k.ext);
+            }
+            return;
+        };
+        match VIRTUAL_KEY(k.vk) {
+            VK_BACK => self.buf.pop(),
+            VK_SPACE => {
+                self.buf.push(Ch::new(SPACE, lay, ' '));
+                if self.buf.word_just_ended() {
+                    self.correct(rx, pending);
+                }
+            }
+            VK_RETURN | VK_TAB if k.boundary => {
+                self.correct(rx, pending);
+                input::tap(k.vk, k.scan, k.ext);
+                self.buf.clear();
+            }
+            _ => match self.char_of(&k, lay) {
+                Some(ch) => self.buf.push(ch),
+                None => self.buf.clear(),
+            },
+        }
+    }
+
+    /// Нажатие проглочено во время правки: напечатать заново.
+    fn replay(&mut self, k: Key, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+        let lay = self.target_lay.or(k.lay);
+        let printable =
+            k.vk == VK_SPACE.0 || numpad_char(k.vk).is_some() || (!k.ext && KEYMAP.key_index(k.scan).is_some());
+        let Some(lay) = lay.filter(|_| printable && !self.excluded && !self.mods.command()) else {
+            input::tap(k.vk, k.scan, k.ext);
+            if k.vk == VK_BACK.0 {
+                self.buf.pop();
+            } else {
+                self.buf.clear();
+            }
+            return;
+        };
+        let ch = if k.vk == VK_SPACE.0 { Ch::new(SPACE, lay, ' ') } else { self.char_of(&k, lay).unwrap() };
+        input::type_text(&ch.render().to_string());
+        self.buf.push(ch);
+        if ch.tok == SPACE && self.buf.word_just_ended() {
+            self.correct(rx, pending);
+        }
+    }
+
+    fn correct(&mut self, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+        if self.cfg.debug {
+            let lay = self
+                .buf
+                .chars
+                .iter()
+                .rev()
+                .find(|c| !KEYMAP.neutral(c.tok))
+                .map_or("?", |c| ["EN", "RU"][c.lay as usize]);
+            if let Ok(words) = self.buf.probe(&mut self.model) {
+                let w: Vec<String> = words.iter().map(|(w, p)| format!("{w}={p:.2}")).collect();
+                println!("  [{} {lay}] {}", self.proc_name, w.join(" "));
+            }
+        }
+        let plan = match self.buf.plan(&mut self.model, self.cfg.threshold) {
+            Ok(Some(p)) => p,
+            Ok(None) => return,
+            Err(e) => {
+                set_status(format!("ошибка прогона: {e}"));
+                return;
+            }
+        };
+        CORRECTING.store(true, SeqCst);
+        fence();
+        // всё, что прошло до флага, уже на экране
+        let mut after = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                Event::Key(k) if k.deferred => pending.push_back(Event::Key(k)),
+                Event::Key(k) if is_modifier(k.vk) => self.modifier(&k),
+                Event::Key(k) if k.up => {}
+                Event::Key(k) if after.is_empty() && !k.boundary && k.hwnd == self.hwnd && !self.mods.command() => {
+                    let ch = if k.vk == VK_SPACE.0 {
+                        k.lay.map(|lay| Ch::new(SPACE, lay, ' '))
+                    } else {
+                        k.lay.and_then(|lay| self.char_of(&k, lay))
+                    };
+                    match ch {
+                        Some(ch) => self.buf.push(ch),
+                        None => after.push(Event::Key(k)),
+                    }
+                }
+                other => after.push(other),
+            }
+        }
+        if after.is_empty() {
+            let fix = self.buf.apply(plan);
+            if !input::replace(fix.erase, &fix.text) {
+                self.buf.clear();
+            } else if fix.last_flipped {
+                input::switch_layout(fix.new_lay);
+                self.target_lay = Some(fix.new_lay);
+            }
+            if self.cfg.debug {
+                println!("«{}» → «{}»", fix.old, fix.text);
+            }
+        }
+        CORRECTING.store(false, SeqCst);
+        for ev in after.into_iter().rev() {
+            pending.push_front(ev);
+        }
+    }
+}
+
+pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
+    let t0 = std::time::Instant::now();
+    let model = match load_model(&cfg) {
+        Ok(m) => m,
+        Err(e) => {
+            set_status(format!("модель не загружена: {e}"));
+            while rx.recv().is_ok() {}
+            return;
+        }
+    };
+    set_status(format!("нейросеть на {}", model.device));
+    if cfg.debug {
+        println!("модель на {} за {:?}", model.device, t0.elapsed());
+    }
+    READY.store(true, SeqCst);
+    let mut w = Worker {
+        cfg,
+        model,
+        buf: Buffer::default(),
+        mods: Mods::default(),
+        caps,
+        hwnd: 0,
+        proc_name: String::new(),
+        excluded: false,
+        target_lay: None,
+    };
+    let mut pending = VecDeque::new();
+    loop {
+        let ev = match pending.pop_front() {
+            Some(e) => e,
+            None => match rx.recv() {
+                Ok(e) => e,
+                Err(_) => return,
+            },
+        };
+        w.handle(ev, &rx, &mut pending);
+        HAS_WORD.store(w.buf.has_word() && !w.excluded, SeqCst);
+    }
+}

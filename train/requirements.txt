@@ -1,0 +1,10 @@
+# torch ставится отдельно под свою CUDA:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+numpy
+pyarrow
+zstandard
+pymorphy3
+pymorphy3-dicts-ru
+onnx
+openvino==2026.4.1
+pillow

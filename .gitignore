@@ -1,0 +1,8 @@
+client/target/
+dist/
+train/venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+data/

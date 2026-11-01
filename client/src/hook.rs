@@ -1,0 +1,128 @@
+//! Низкоуровневые хуки: только кладут событие в очередь.
+
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::mpsc::Sender;
+
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyboardLayout, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
+    VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CallNextHookEx, GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, HC_ACTION,
+    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+};
+
+use crate::keymap::{EN, RU};
+
+/// Метка наших синтетических нажатий в dwExtraInfo.
+pub const MARKER: usize = 0x5345_4B59;
+
+pub static SENDER: OnceLock<Sender<Event>> = OnceLock::new();
+pub static ENABLED: AtomicBool = AtomicBool::new(true);
+pub static CORRECTING: AtomicBool = AtomicBool::new(false);
+pub static HAS_WORD: AtomicBool = AtomicBool::new(false);
+
+#[derive(Clone, Copy, Debug)]
+pub struct Key {
+    pub vk: u16,
+    pub scan: u16,
+    pub up: bool,
+    pub ext: bool,
+    pub lay: Option<u8>,
+    pub hwnd: isize,
+    /// Проглочено хуком: воспроизвести после правки.
+    pub deferred: bool,
+    /// Enter/Tab проглочен до проверки слова.
+    pub boundary: bool,
+}
+
+pub enum Event {
+    Key(Key),
+    Mouse,
+}
+
+pub fn is_modifier(vk: u16) -> bool {
+    [
+        VK_SHIFT,
+        VK_LSHIFT,
+        VK_RSHIFT,
+        VK_CONTROL,
+        VK_LCONTROL,
+        VK_RCONTROL,
+        VK_MENU,
+        VK_LMENU,
+        VK_RMENU,
+        VK_LWIN,
+        VK_RWIN,
+        VK_CAPITAL,
+    ]
+    .iter()
+    .any(|v| v.0 == vk)
+}
+
+/// Раскладка потока с фокусом ввода: RU, EN или другая.
+pub fn foreground_layout() -> (Option<u8>, HWND) {
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        let mut tid = GetWindowThreadProcessId(hwnd, None);
+        let mut gti = GUITHREADINFO { cbSize: size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+        if GetGUIThreadInfo(tid, &mut gti).is_ok() && !gti.hwndFocus.is_invalid() {
+            tid = GetWindowThreadProcessId(gti.hwndFocus, None);
+        }
+        let lang = (GetKeyboardLayout(tid).0 as usize & 0xFFFF) as u16;
+        let lay = match lang & 0x3FF {
+            0x19 => Some(RU),
+            0x09 => Some(EN),
+            _ => None,
+        };
+        (lay, hwnd)
+    }
+}
+
+pub unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if code == HC_ACTION as i32 && ENABLED.load(SeqCst) {
+            let k = &*(lp.0 as *const KBDLLHOOKSTRUCT);
+            if k.dwExtraInfo != MARKER {
+                let vk = k.vkCode as u16;
+                let up = k.flags.0 & LLKHF_UP.0 != 0;
+                let modifier = is_modifier(vk);
+                let deferred = !up && !modifier && CORRECTING.load(SeqCst);
+                let boundary = !up && !deferred && (vk == VK_RETURN.0 || vk == VK_TAB.0) && HAS_WORD.load(SeqCst);
+                let (lay, hwnd) = foreground_layout();
+                if let Some(tx) = SENDER.get() {
+                    let ev = Key {
+                        vk,
+                        scan: k.scanCode as u16,
+                        up,
+                        ext: k.flags.0 & LLKHF_EXTENDED.0 != 0,
+                        lay,
+                        hwnd: hwnd.0 as isize,
+                        deferred,
+                        boundary,
+                    };
+                    if tx.send(Event::Key(ev)).is_ok() && (deferred || boundary) {
+                        return LRESULT(1);
+                    }
+                }
+            }
+        }
+        CallNextHookEx(None, code, wp, lp)
+    }
+}
+
+pub unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if code == HC_ACTION as i32 {
+            let m = wp.0 as u32;
+            if [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN].contains(&m)
+                && let Some(tx) = SENDER.get()
+            {
+                let _ = tx.send(Event::Mouse);
+            }
+        }
+        CallNextHookEx(None, code, wp, lp)
+    }
+}

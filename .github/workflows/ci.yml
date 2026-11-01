@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  OPENVINO_VERSION: "2026.4.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  client:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - name: Format
+        working-directory: client
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: client
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        working-directory: client
+        run: cargo test
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: OpenVINO runtime
+        run: python -m pip install openvino==${{ env.OPENVINO_VERSION }}
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build distribution and installer
+        shell: pwsh
+        run: ./scripts/make-dist.ps1
+
+      - name: Model self-test (CPU)
+        shell: pwsh
+        run: ./scripts/selftest.ps1 -ExtraArgs --no-update-check
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AntiPunto-${{ github.sha }}
+          path: |
+            dist/*-setup.exe
+            dist/*-portable.zip
+            dist/SHA256SUMS.txt
+
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Syntax check
+        run: python -m py_compile train/*.py client/assets/make_icons.py

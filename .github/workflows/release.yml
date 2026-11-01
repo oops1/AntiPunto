@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  OPENVINO_VERSION: "2026.4.1"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag matches Cargo.toml version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path client/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "tag $env:GITHUB_REF_NAME != Cargo.toml v$v" }
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: OpenVINO runtime
+        run: python -m pip install openvino==${{ env.OPENVINO_VERSION }}
+
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Build distribution and installer
+        shell: pwsh
+        run: ./scripts/make-dist.ps1
+
+      - name: Model self-test (CPU)
+        shell: pwsh
+        run: ./scripts/selftest.ps1 -ExtraArgs --no-update-check
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $files = Get-ChildItem dist -File | Where-Object { $_.Name -match '(-setup\.exe|-portable\.zip|SHA256SUMS\.txt)$' } | ForEach-Object FullName
+          gh release create $env:GITHUB_REF_NAME @files --title "AntiPunto $env:GITHUB_REF_NAME" --generate-notes

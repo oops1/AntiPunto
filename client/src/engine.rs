@@ -199,11 +199,16 @@ impl Buffer {
             let lay = self.chars[core].lay;
             let shown = norm(self.chars[a..b].iter().map(Ch::render));
             let other = norm(self.chars[a..b].iter().map(|c| Ch { lay: 1 - c.lay, ..*c }.render()));
+            let forced = lists.force.contains(&other);
             let mut want = self.chars[core].typed ^ (pm > threshold) as u8;
-            if lists.force.contains(&other) {
+            if forced {
                 want = 1 - lay;
             }
-            let keep = lists.ignore.contains(&shown) || (n <= SHORT && real_short_word(&self.chars[a..b]));
+            // «не трогать» сильнее всего; «всегда исправлять» сильнее словаря коротких слов
+            // желанное слово уже на экране — не трогать
+            let keep = lists.ignore.contains(&shown)
+                || lists.force.contains(&shown)
+                || (!forced && n <= SHORT && real_short_word(&self.chars[a..b]));
             if allowed && !keep && want != lay {
                 flips.push((a, b, want));
             }

@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{CloseHandle, HWND};
 use windows::Win32::System::Threading::{
@@ -15,7 +16,7 @@ use windows::core::PWSTR;
 
 use crate::engine::{Buffer, Ch};
 use crate::focus::Focus;
-use crate::hook::{CORRECTING, Event, HAS_WORD, Key, is_modifier};
+use crate::hook::{CORRECTING, Event, HAS_WORD, Key, UNDO_READY, is_modifier};
 use crate::keymap::{KEYMAP, OTHER, SPACE};
 use crate::lists::{self, Lists};
 use crate::ov::Model;
@@ -66,6 +67,9 @@ struct Worker {
     target_lay: Option<u8>,
     undo: Option<Undo>,
     stats: Stats,
+    /// Двойной правый Ctrl: нажатие без других клавиш и время прошлого.
+    rctrl_clean: bool,
+    rctrl_tap: Option<Instant>,
 }
 
 /// Программа, где печатали последней: для пункта меню «не исправлять здесь».
@@ -100,8 +104,22 @@ fn numpad_char(vk: u16) -> Option<char> {
 }
 
 impl Worker {
-    fn modifier(&mut self, k: &Key) {
+    /// Учесть модификатор; true — сработал двойной правый Ctrl.
+    fn modifier(&mut self, k: &Key) -> bool {
         let down = !k.up;
+        let mut double = false;
+        if k.vk == VK_RCONTROL.0 {
+            if down && !self.mods.ctrl_r {
+                self.rctrl_clean = true;
+            } else if !down && self.rctrl_clean {
+                let now = Instant::now();
+                double = self.rctrl_tap.is_some_and(|t| now - t < Duration::from_millis(400));
+                self.rctrl_tap = if double { None } else { Some(now) };
+            }
+        } else if down {
+            self.rctrl_clean = false;
+            self.rctrl_tap = None;
+        }
         match VIRTUAL_KEY(k.vk) {
             VK_LSHIFT => self.mods.shift_l = down,
             VK_RSHIFT => self.mods.shift_r = down,
@@ -114,6 +132,7 @@ impl Worker {
             VK_CAPITAL if down => self.caps = !self.caps,
             _ => {}
         }
+        double
     }
 
     /// Символ печатной клавиши в раскладке lay.
@@ -132,17 +151,23 @@ impl Worker {
         let k = match ev {
             Event::Mouse => {
                 self.buf.clear();
+                self.undo = None;
+                self.rctrl_tap = None;
                 return;
             }
             Event::Key(k) => k,
         };
         if is_modifier(k.vk) {
-            self.modifier(&k);
+            if self.modifier(&k) && !self.excluded {
+                self.pause();
+            }
             return;
         }
         if k.up {
             return;
         }
+        self.rctrl_clean = false;
+        self.rctrl_tap = None;
         self.lists.refresh();
         if k.hwnd != self.hwnd {
             self.hwnd = k.hwnd;
@@ -162,6 +187,16 @@ impl Worker {
     /// Клавиша уже дошла до приложения (или Enter/Tab на проверке).
     fn typed(&mut self, k: Key, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
         self.target_lay = None;
+        if k.undo {
+            // хук проглотил Backspace; отменять нечего — стереть как обычно
+            if self.undo.is_some() {
+                self.pause();
+            } else {
+                input::tap(k.vk, k.scan, k.ext);
+                self.buf.pop();
+            }
+            return;
+        }
         let Some(lay) = k.lay.filter(|_| !self.excluded && !self.mods.command()) else {
             self.buf.clear();
             self.undo = None;
@@ -290,10 +325,16 @@ impl Worker {
         fence();
         // всё, что прошло до флага, уже на экране
         let mut after = Vec::new();
+        let mut typed_more = false;
         while let Ok(ev) = rx.try_recv() {
             match ev {
-                Event::Key(k) if k.deferred => pending.push_back(Event::Key(k)),
-                Event::Key(k) if is_modifier(k.vk) => self.modifier(&k),
+                Event::Key(k) if k.deferred => {
+                    typed_more = true;
+                    pending.push_back(Event::Key(k));
+                }
+                Event::Key(k) if is_modifier(k.vk) => {
+                    let _ = self.modifier(&k);
+                }
                 Event::Key(k) if k.up => {}
                 Event::Key(k) if after.is_empty() && !k.boundary && k.hwnd == self.hwnd && !self.mods.command() => {
                     let ch = if k.vk == VK_SPACE.0 {
@@ -302,7 +343,10 @@ impl Worker {
                         k.lay.and_then(|lay| self.char_of(&k, lay))
                     };
                     match ch {
-                        Some(ch) => self.buf.push(ch),
+                        Some(ch) => {
+                            typed_more = true;
+                            self.buf.push(ch);
+                        }
                         None => after.push(Event::Key(k)),
                     }
                 }
@@ -319,6 +363,10 @@ impl Worker {
                 self.stats.fixes += 1;
                 *self.stats.by_app.entry(self.proc_name.clone()).or_default() += 1;
                 self.undo = Some(Undo { before, text: fix.text.clone(), old: fix.old.clone(), old_lay });
+                // Backspace отменяет, только если после правки ничего не набрано
+                if !typed_more {
+                    UNDO_READY.store(true, SeqCst);
+                }
                 if fix.last_flipped {
                     input::switch_layout(fix.new_lay);
                     self.target_lay = Some(fix.new_lay);
@@ -370,6 +418,8 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         target_lay: None,
         undo: None,
         stats,
+        rctrl_clean: false,
+        rctrl_tap: None,
     };
     let mut pending = VecDeque::new();
     loop {

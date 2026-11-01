@@ -35,12 +35,12 @@ foreach ($r in $rows) {
 $map[" "] = @(0x39, $false)
 
 # Поля по очереди, переход клавишей Tab. Набор — физические клавиши как на EN.
-# 1) раскладка по смыслу; 2) Pause сразу после правки — отмена;
-# 3) Pause на верном слове — принудительно; 4) поле пароля — не трогать (там уже RU после п.3).
+# 1) раскладка по смыслу; 2) Backspace сразу после правки — отмена;
+# 3) двойной правый Ctrl на верном слове — принудительно; 4) поле пароля — не трогать (там уже RU после п.3).
 $fields = @(
     @{ steps = @("ghbdtn rfr ltkf ", "z d rehct ", "hello world "); expect = "привет как дела я в курсе hello world " },
-    @{ steps = @("ghbdtn ", "{PAUSE}"); expect = "ghbdtn " },
-    @{ steps = @("hello ", "{PAUSE}"); expect = "руддщ " },
+    @{ steps = @("ghbdtn ", "{BACK}"); expect = "ghbdtn " },
+    @{ steps = @("hello ", "{RCTRL2}"); expect = "руддщ " },
     @{ steps = @("hello "); expect = "руддщ "; password = $true }
 )
 
@@ -92,6 +92,8 @@ $timer.Add_Tick({
     $form.Close(); return
   }
   if ($item -eq "{PAUSE}") { [KB]::Vk(0x13); return }
+  if ($item -eq "{BACK}") { [KB]::Scan(0x0E, $false); [KB]::Scan(0x0E, $true); return }
+  if ($item -eq "{RCTRL2}") { [KB]::Vk(0xA3); Start-Sleep -Milliseconds 120; [KB]::Vk(0xA3); return }
   if ($item -eq "{TAB}") { [KB]::Scan(0x0F, $false); [KB]::Scan(0x0F, $true); return }
   $k = $map[$item]
   if ($k[1]) { [KB]::Scan(0x2A, $false) }

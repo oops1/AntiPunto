@@ -32,13 +32,15 @@ fn send(inputs: &[INPUT]) -> bool {
 
 /// Стереть erase символов и напечатать text.
 pub fn replace(erase: usize, text: &str) -> bool {
-    let mut v = Vec::with_capacity(erase * 2 + text.len() * 2);
+    let mut v = Vec::with_capacity(erase * 2);
     for _ in 0..erase {
         v.push(key(VK_BACK.0, 0, KEYBD_EVENT_FLAGS(0)));
         v.push(key(VK_BACK.0, 0, KEYEVENTF_KEYUP));
     }
-    unicode(&mut v, text);
-    send(&v)
+    let ok = send(&v);
+    // приложения с TSF (Блокнот Win11) иначе путают порядок
+    std::thread::sleep(std::time::Duration::from_millis(8));
+    ok && type_text(text)
 }
 
 pub fn type_text(text: &str) -> bool {
@@ -54,6 +56,8 @@ pub fn tap(vk: u16, scan: u16, ext: bool) -> bool {
 
 /// Попросить окно переднего плана сменить раскладку.
 pub fn switch_layout(lay: u8) {
+    // смена языка в полёте теряет нажатие: дать приложению дочитать очередь
+    std::thread::sleep(std::time::Duration::from_millis(40));
     unsafe {
         let n = GetKeyboardLayoutList(None);
         let mut list = vec![HKL::default(); n.max(0) as usize];

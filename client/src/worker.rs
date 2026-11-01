@@ -351,6 +351,7 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
     }
     READY.store(true, SeqCst);
     lists::ensure_files();
+    lists::watch();
     let mut lists = Lists::default();
     lists.refresh();
     let stats = Stats::load();

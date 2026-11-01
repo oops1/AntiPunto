@@ -58,7 +58,11 @@ python -m pip install openvino==2026.4.1
 
 Обучение модели — в `train/` (Python, PyTorch); устройство и результаты — в [ARCHITECTURE.md](ARCHITECTURE.md).
 
-## Релиз
+## Ветки и релиз
 
-Версия берётся из `client/Cargo.toml`. Тег `vX.Y.Z` запускает сборку на GitHub Actions:
-тесты, дистрибутив, самотест модели, установщик, `SHA256SUMS.txt` и публикация релиза.
+- Работа идёт в `develop`; CI проверяет каждый push.
+- `main` защищена: только через pull request из `develop` (merge commit), после зелёного CI;
+  удалять ветку и переписывать историю нельзя.
+- Релиз: поднять версию в `client/Cargo.toml` в `develop` → PR в `main` → тег `vX.Y.Z` на коммит в `main`.
+  Тег запускает сборку на GitHub Actions: тесты, дистрибутив, самотест модели, установщик,
+  `SHA256SUMS.txt` и публикация релиза.

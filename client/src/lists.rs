@@ -1,8 +1,12 @@
 //! Списки пользователя: программы-исключения, слова-исключения, жёсткие слова.
 
 use std::collections::HashSet;
+use std::ffi::c_void;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
+
+use windows::Win32::System::Com::CoTaskMemFree;
+use windows::Win32::UI::Shell::{FOLDERID_Documents, KNOWN_FOLDER_FLAG, SHGetKnownFolderPath};
 
 pub const PROGRAMS: &str = "programs.txt";
 pub const IGNORE: &str = "ignore.txt";
@@ -17,8 +21,18 @@ const HEADERS: [(&str, &str); 3] = [
     ),
 ];
 
+/// «Документы\AntiPunto»: не AppData — её Блокнот Windows 11 (MSIX) видит виртуализированной.
 pub fn dir() -> PathBuf {
-    std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default().join("AntiPunto")
+    unsafe {
+        if let Ok(p) = SHGetKnownFolderPath(&FOLDERID_Documents, KNOWN_FOLDER_FLAG(0), None) {
+            let s = p.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(p.0 as *const c_void));
+            if !s.is_empty() {
+                return PathBuf::from(s).join("AntiPunto");
+            }
+        }
+    }
+    std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join("Documents").join("AntiPunto")
 }
 
 pub fn path(name: &str) -> PathBuf {

@@ -3,7 +3,9 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use crate::lists::dir;
+fn dir() -> std::path::PathBuf {
+    std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_default().join("AntiPunto")
+}
 
 #[derive(Default, Clone, PartialEq)]
 pub struct Stats {

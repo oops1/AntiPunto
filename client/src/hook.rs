@@ -6,8 +6,8 @@ use std::sync::mpsc::Sender;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
-    VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+    GetAsyncKeyState, GetKeyboardLayout, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU,
+    VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, HC_ACTION,
@@ -23,6 +23,8 @@ pub static SENDER: OnceLock<Sender<Event>> = OnceLock::new();
 pub static ENABLED: AtomicBool = AtomicBool::new(true);
 pub static CORRECTING: AtomicBool = AtomicBool::new(false);
 pub static HAS_WORD: AtomicBool = AtomicBool::new(false);
+/// Только что была автоправка: голый Backspace её отменит.
+pub static UNDO_READY: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Key {
@@ -36,6 +38,12 @@ pub struct Key {
     pub deferred: bool,
     /// Enter/Tab проглочен до проверки слова.
     pub boundary: bool,
+    /// Backspace проглочен как отмена автоправки.
+    pub undo: bool,
+}
+
+fn held(vk: VIRTUAL_KEY) -> bool {
+    unsafe { GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000 != 0 }
 }
 
 pub enum Event {
@@ -91,6 +99,13 @@ pub unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRES
                 let modifier = is_modifier(vk);
                 let deferred = !up && !modifier && CORRECTING.load(SeqCst);
                 let boundary = !up && !deferred && (vk == VK_RETURN.0 || vk == VK_TAB.0) && HAS_WORD.load(SeqCst);
+                // любая клавиша, кроме голого Backspace, отменять уже нечего
+                let undo = !up
+                    && !modifier
+                    && UNDO_READY.swap(false, SeqCst)
+                    && vk == VK_BACK.0
+                    && !deferred
+                    && ![VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN].into_iter().any(held);
                 let (lay, hwnd) = foreground_layout();
                 if let Some(tx) = SENDER.get() {
                     let ev = Key {
@@ -102,8 +117,9 @@ pub unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRES
                         hwnd: hwnd.0 as isize,
                         deferred,
                         boundary,
+                        undo,
                     };
-                    if tx.send(Event::Key(ev)).is_ok() && (deferred || boundary) {
+                    if tx.send(Event::Key(ev)).is_ok() && (deferred || boundary || undo) {
                         return LRESULT(1);
                     }
                 }
@@ -117,10 +133,11 @@ pub unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> L
     unsafe {
         if code == HC_ACTION as i32 {
             let m = wp.0 as u32;
-            if [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN].contains(&m)
-                && let Some(tx) = SENDER.get()
-            {
-                let _ = tx.send(Event::Mouse);
+            if [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN].contains(&m) {
+                UNDO_READY.store(false, SeqCst);
+                if let Some(tx) = SENDER.get() {
+                    let _ = tx.send(Event::Mouse);
+                }
             }
         }
         CallNextHookEx(None, code, wp, lp)

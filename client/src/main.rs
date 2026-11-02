@@ -58,7 +58,7 @@ fn config() -> (Config, Option<String>) {
         update_check: true,
         expect: None,
         spell: true,
-        spell_threshold: 0.85,
+        spell_threshold: 0.80,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);
@@ -107,8 +107,8 @@ pub fn load_speller(c: &Config) -> Result<spell::Speller, String> {
         &[spell::K * spell::L],
         spell::K,
     )?;
-    let ru = spell::Dict::load(&dir.join("spell_ru.tsv"))?;
-    let en = spell::Dict::load(&dir.join("spell_en.tsv"))?;
+    let ru = spell::Dict::load(&dir.join("spell_ru.tsv"), true)?;
+    let en = spell::Dict::load(&dir.join("spell_en.tsv"), false)?;
     let known = spell::Known::load(&dir.join("spell_known.bloom")).ok();
     Ok(spell::Speller::new(ru, en, known, model, c.spell_threshold))
 }

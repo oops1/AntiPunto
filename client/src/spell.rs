@@ -1,6 +1,5 @@
 //! Орфография: словарь, кандидаты (как train/spell_common.py), ранжировщик.
 
-use std::collections::HashMap;
 use std::path::Path;
 
 use crate::ov::Model;
@@ -28,17 +27,51 @@ fn freq_bucket(f: u32) -> i32 {
     if f == 0 { 0 } else { (1 + ((f as f64).log2() / 1.5) as i32).min(15) }
 }
 
-fn fnv(s: &[char]) -> u64 {
+const ALPHA_RU: &str = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя";
+const ALPHA_EN: &str = "abcdefghijklmnopqrstuvwxyz";
+
+/// FNV-1a по символам, без символа skip (для удалений без копирования).
+fn fnv_skip(s: &[char], skip: usize) -> u32 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &c in s {
-        h ^= c as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    for (i, &c) in s.iter().enumerate() {
+        if i != skip {
+            h ^= c as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
     }
-    h
+    (h ^ (h >> 32)) as u32
 }
 
-fn deletes1(w: &[char]) -> Vec<Vec<char>> {
-    (0..w.len()).map(|i| w.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, &c)| c).collect()).collect()
+fn fnv(s: &[char]) -> u32 {
+    fnv_skip(s, usize::MAX)
+}
+
+/// Все строки в одной правке: удаление, перестановка, замена, вставка (как edits1 в Python).
+fn edits1(w: &[char], alpha: &[char]) -> Vec<Vec<char>> {
+    let mut out = Vec::with_capacity(alpha.len() * (2 * w.len() + 1) + 2 * w.len());
+    for i in 0..w.len() {
+        let mut v = w.to_vec();
+        v.remove(i);
+        out.push(v);
+    }
+    for i in 0..w.len().saturating_sub(1) {
+        let mut v = w.to_vec();
+        v.swap(i, i + 1);
+        out.push(v);
+    }
+    for i in 0..=w.len() {
+        for &c in alpha {
+            let mut v = w.to_vec();
+            v.insert(i, c);
+            out.push(v);
+            if i < w.len() && w[i] != c {
+                let mut v = w.to_vec();
+                v[i] = c;
+                out.push(v);
+            }
+        }
+    }
+    out
 }
 
 /// Расстояние Дамерау–Левенштейна (оптимальное выравнивание строк).
@@ -62,70 +95,112 @@ pub fn osa(a: &[char], b: &[char]) -> usize {
     d[a.len()][b.len()]
 }
 
+/// (хеш, номер слова) по хешу + корзины по старшим битам: поиск за два обращения к памяти.
+struct Index {
+    items: Vec<(u32, u32)>,
+    heads: Vec<u32>,
+    shift: u32,
+}
+
+impl Index {
+    fn new(mut items: Vec<(u32, u32)>) -> Index {
+        items.sort_unstable();
+        items.shrink_to_fit();
+        let bits = (usize::BITS - items.len().max(256).leading_zeros()).min(24);
+        let shift = 32 - bits;
+        let mut heads = vec![0u32; (1 << bits) + 1];
+        for &(h, _) in &items {
+            heads[(h >> shift) as usize + 1] += 1;
+        }
+        for b in 1..heads.len() {
+            heads[b] += heads[b - 1];
+        }
+        Index { items, heads, shift }
+    }
+
+    fn get(&self, h: u32) -> impl Iterator<Item = u32> + '_ {
+        let b = (h >> self.shift) as usize;
+        let slot = &self.items[self.heads[b] as usize..self.heads[b + 1] as usize];
+        slot.iter().filter(move |&&(x, _)| x == h).map(|&(_, i)| i)
+    }
+}
+
+/// Словарь: слова одной строкой, индексы по 32-битным хешам (ложные совпадения отсекает osa).
 pub struct Dict {
-    words: Vec<String>,
-    freq: HashMap<String, u32>,
-    /// (хеш удаления, номер слова), отсортировано по хешу.
-    deletes: Vec<(u64, u32)>,
+    text: String,
+    /// Начало слова i в text; последний элемент — конец.
+    offs: Vec<u32>,
+    freq: Vec<u32>,
+    exact: Index,
+    /// Хеши слов без одной буквы.
+    deletes: Index,
+    alpha: Vec<char>,
 }
 
 impl Dict {
-    pub fn load(path: &Path) -> Result<Dict, String> {
-        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let mut words = Vec::new();
-        let mut freq = HashMap::new();
-        let mut deletes = Vec::new();
-        for line in text.lines() {
+    pub fn load(path: &Path, ru: bool) -> Result<Dict, String> {
+        let src = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let (mut text, mut offs, mut freq) = (String::new(), vec![0u32], Vec::new());
+        let (mut exact, mut deletes) = (Vec::new(), Vec::new());
+        for line in src.lines() {
             let Some((w, c)) = line.split_once('\t') else { continue };
-            let id = words.len() as u32;
+            let id = freq.len() as u32;
             let chars: Vec<char> = w.chars().collect();
-            for d in deletes1(&chars) {
-                deletes.push((fnv(&d), id));
-            }
-            freq.insert(w.to_string(), c.trim().parse().unwrap_or(1));
-            words.push(w.to_string());
+            exact.push((fnv(&chars), id));
+            let mut ds: Vec<u32> = (0..chars.len()).map(|i| fnv_skip(&chars, i)).collect();
+            ds.sort_unstable();
+            ds.dedup();
+            deletes.extend(ds.into_iter().map(|h| (h, id)));
+            freq.push(c.trim().parse().unwrap_or(1));
+            text.push_str(w);
+            offs.push(text.len() as u32);
         }
-        deletes.sort_unstable();
-        Ok(Dict { words, freq, deletes })
+        text.shrink_to_fit();
+        let alpha = if ru { ALPHA_RU } else { ALPHA_EN }.chars().collect();
+        Ok(Dict { text, offs, freq, exact: Index::new(exact), deletes: Index::new(deletes), alpha })
+    }
+
+    fn word(&self, i: u32) -> &str {
+        &self.text[self.offs[i as usize] as usize..self.offs[i as usize + 1] as usize]
+    }
+
+    fn id(&self, w: &str) -> Option<u32> {
+        let chars: Vec<char> = w.chars().collect();
+        self.exact.get(fnv(&chars)).find(|&i| self.word(i) == w)
     }
 
     pub fn contains(&self, w: &str) -> bool {
-        self.freq.contains_key(w)
+        self.id(w).is_some()
     }
 
-    fn by_delete(&self, key: &[char]) -> impl Iterator<Item = &str> {
-        let h = fnv(key);
-        let start = self.deletes.partition_point(|&(x, _)| x < h);
-        self.deletes[start..].iter().take_while(move |&&(x, _)| x == h).map(|&(_, i)| self.words[i as usize].as_str())
+    pub fn freq_of(&self, w: &str) -> u32 {
+        self.id(w).map_or(0, |i| self.freq[i as usize])
     }
 
-    /// Словарные слова в пределах ~2 правок, лучшие первыми.
+    /// Номера слов в одной правке от v (удаление с каждой стороны); с лишними — их отсечёт osa.
+    fn near(&self, v: &[char], found: &mut Vec<u32>) {
+        for skip in std::iter::once(usize::MAX).chain(0..v.len()) {
+            let h = fnv_skip(v, skip);
+            found.extend(self.exact.get(h));
+            found.extend(self.deletes.get(h));
+        }
+    }
+
+    /// Все словарные слова в пределах 2 правок: (расстояние, −частота, слово), лучшие первыми.
     pub fn candidates(&self, typed: &str) -> Vec<String> {
         let t: Vec<char> = typed.chars().collect();
-        let d1 = deletes1(&t);
-        let mut found: Vec<&str> = Vec::new();
-        for k in std::iter::once(t.clone()).chain(d1.iter().cloned()) {
-            let s: String = k.iter().collect();
-            if let Some((w, _)) = self.freq.get_key_value(&s) {
-                found.push(w);
-            }
-            found.extend(self.by_delete(&k));
-        }
-        // две лишние буквы в набранном («черерез» → «через»)
-        for k in &d1 {
-            for k2 in deletes1(k) {
-                let s: String = k2.iter().collect();
-                if let Some((w, _)) = self.freq.get_key_value(&s) {
-                    found.push(w);
-                }
-            }
+        let mut found = Vec::new();
+        self.near(&t, &mut found);
+        for v in edits1(&t, &self.alpha) {
+            self.near(&v, &mut found);
         }
         found.sort_unstable();
         found.dedup();
         let mut scored: Vec<(usize, i64, &str)> = found
             .into_iter()
-            .filter(|&w| w != typed)
-            .map(|w| (osa(&t, &w.chars().collect::<Vec<_>>()), -(self.freq[w] as i64), w))
+            .map(|i| (i, self.word(i)))
+            .filter(|&(_, w)| w != typed)
+            .map(|(i, w)| (osa(&t, &w.chars().collect::<Vec<_>>()), -(self.freq[i as usize] as i64), w))
             .filter(|&(d, _, _)| d <= 2)
             .collect();
         scored.sort();
@@ -234,7 +309,7 @@ impl Speller {
         x[..L].copy_from_slice(&row(ctx, typed, typed, 0, 0, 0));
         for (j, c) in cands.iter().enumerate() {
             let dist = osa(&t, &c.chars().collect::<Vec<_>>());
-            let r = row(ctx, typed, c, j + 1, dist, d.freq[c.as_str()]);
+            let r = row(ctx, typed, c, j + 1, dist, d.freq_of(c));
             x[(j + 1) * L..(j + 2) * L].copy_from_slice(&r);
         }
         let mut z = [0f32; K];
@@ -271,6 +346,46 @@ mod tests {
         }
         for w in ["удететь", "преокт", "черерез", "которобго"] {
             assert!(!k.contains(w), "{w}");
+        }
+    }
+
+    /// Кандидаты как в Python: tests/spell_candidates.tsv пишет train/spell_export.py.
+    #[test]
+    fn candidates_match_python() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture = std::fs::read_to_string(root.join("tests/spell_candidates.tsv")).expect("spell_candidates.tsv");
+        let ru = Dict::load(&root.join("../models/spell_ru.tsv"), true).unwrap();
+        let en = Dict::load(&root.join("../models/spell_en.tsv"), false).unwrap();
+        let mut n = 0;
+        for line in fixture.lines() {
+            let mut parts = line.split('\t');
+            let (lang, typed) = (parts.next().unwrap(), parts.next().unwrap());
+            let want: Vec<&str> = parts.next().unwrap_or("").split(' ').filter(|s| !s.is_empty()).collect();
+            let d = if lang == "ru" { &ru } else { &en };
+            assert_eq!(d.candidates(typed), want, "{typed}");
+            n += 1;
+        }
+        assert!(n >= 50, "мало примеров: {n}");
+    }
+
+    #[test]
+    #[ignore]
+    fn candidates_timing() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ru = Dict::load(&root.join("../models/spell_ru.tsv"), true).unwrap();
+        for w in ["подключаюсб", "коментари", "сесию", "видеш", "артифакты", "рабоате"]
+        {
+            let t: Vec<char> = w.chars().collect();
+            let t0 = std::time::Instant::now();
+            let mut found = Vec::new();
+            ru.near(&t, &mut found);
+            for v in edits1(&t, &ru.alpha) {
+                ru.near(&v, &mut found);
+            }
+            let t1 = t0.elapsed();
+            let n = found.len();
+            let c = ru.candidates(w);
+            println!("{w}: найдено {n}, поиск {t1:?}, всего {:?}, {}", t0.elapsed(), c.len());
         }
     }
 

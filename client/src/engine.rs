@@ -28,6 +28,19 @@ fn real_short_word(word: &[Ch]) -> bool {
     list.contains(&w.as_str())
 }
 
+/// Слово для орфографии: (кавычки слева, знаки справа, русское ли).
+pub fn spell_core(text: &[char]) -> Option<(usize, usize, bool)> {
+    let lead = text.iter().take_while(|c| "(\"«'".contains(**c)).count();
+    let trail = text.iter().rev().take_while(|c| ".,!?;:)\"»'".contains(**c)).count();
+    if lead + trail >= text.len() {
+        return None;
+    }
+    let core = &text[lead..text.len() - trail];
+    let ru = core.iter().all(|&c| ('а'..='я').contains(&c) || c == 'ё');
+    let en = core.iter().all(|c| c.is_ascii_lowercase());
+    ((3..=20).contains(&core.len()) && (ru || en)).then_some((lead, trail, ru))
+}
+
 #[derive(Clone, Copy)]
 pub struct Ch {
     pub tok: u8,
@@ -256,18 +269,8 @@ impl Buffer {
         }
         let &(a, b) = self.spans(end).last()?;
         let text: Vec<char> = self.chars[a..b].iter().map(Ch::render).collect();
-        let lead = text.iter().take_while(|c| "(\"«'".contains(**c)).count();
-        let trail = text.iter().rev().take_while(|c| ".,!?;:)\"»'".contains(**c)).count();
-        if lead + trail >= text.len() {
-            return None;
-        }
+        let (lead, trail, ru) = spell_core(&text)?;
         let core: String = text[lead..text.len() - trail].iter().collect();
-        let n = core.chars().count();
-        let ru = core.chars().all(|c| ('а'..='я').contains(&c) || c == 'ё');
-        let en = core.chars().all(|c| c.is_ascii_lowercase());
-        if !(3..=20).contains(&n) || !(ru || en) {
-            return None;
-        }
         let ctx: String = self.chars[..a + lead].iter().map(Ch::render).collect();
         Some((a + lead, b - trail, core, ctx, ru))
     }

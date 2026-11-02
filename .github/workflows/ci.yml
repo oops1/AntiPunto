@@ -24,6 +24,10 @@ jobs:
         with:
           workspaces: client
 
+      - name: CHANGELOG has this version
+        shell: pwsh
+        run: ./scripts/release-notes.ps1 | Out-Null
+
       - name: Format
         working-directory: client
         run: cargo fmt --check

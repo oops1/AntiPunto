@@ -57,7 +57,7 @@ fn config() -> (Config, Option<String>) {
         update_check: true,
         expect: None,
         spell: true,
-        spell_threshold: 0.85,
+        spell_threshold: 0.90,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);
@@ -119,10 +119,17 @@ fn spelltest(c: &Config, text: &str) -> Result<(), String> {
     println!("загрузка {:?}", t0.elapsed());
     let mut out = String::new();
     let mut ctx = String::new();
-    for word in text.split(' ').filter(|w| !w.is_empty()) {
-        let ru = word.chars().any(|ch| ('а'..='я').contains(&ch) || ch == 'ё');
+    for token in text.split(' ').filter(|w| !w.is_empty()) {
+        let chars: Vec<char> = token.chars().collect();
+        let Some((lead, trail, ru)) = engine::spell_core(&chars) else {
+            out += token;
+            out.push(' ');
+            ctx = out.clone();
+            continue;
+        };
+        let word: String = chars[lead..chars.len() - trail].iter().collect();
         let t = std::time::Instant::now();
-        let fix = sp.suggest(&ctx, word, ru)?;
+        let fix = sp.suggest(&format!("{ctx}{}", String::from_iter(&chars[..lead])), &word, ru)?;
         let shown = match &fix {
             Some((w, p)) if *p >= sp.threshold => {
                 println!("  «{word}» → «{w}» {p:.2} ({:?})", t.elapsed());
@@ -130,11 +137,13 @@ fn spelltest(c: &Config, text: &str) -> Result<(), String> {
             }
             Some((w, p)) => {
                 println!("  «{word}» → «{w}»? {p:.2} — ниже порога");
-                word.to_string()
+                word
             }
-            None => word.to_string(),
+            None => word,
         };
+        out.extend(&chars[..lead]);
         out += &shown;
+        out.extend(&chars[chars.len() - trail..]);
         out.push(' ');
         ctx = out.clone();
     }

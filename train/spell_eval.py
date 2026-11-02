@@ -16,10 +16,11 @@ DATA = paths.ROOT / "spell"
 
 if __name__ == "__main__":
     split = sys.argv[1] if len(sys.argv) > 1 else "test"
+    ckpt = sys.argv[2] if len(sys.argv) > 2 else "spell"
     d = np.load(DATA / f"{split}.npz")
     x, m, y = torch.from_numpy(d["x"]).long(), torch.from_numpy(d["m"]), torch.from_numpy(d["y"]).long()
     net = SpellNet().eval()
-    net.load_state_dict(torch.load(DATA / "spell.pt", map_location="cpu"))
+    net.load_state_dict(torch.load(DATA / f"{ckpt}.pt", map_location="cpu"))
     probs = []
     with torch.no_grad():
         for i in range(0, len(x), 256):
@@ -54,6 +55,6 @@ if __name__ == "__main__":
             f"пропущено {1 - right - wrong:.1%} | ложных правок правильных слов {false:.2%}\n"
             f"   как в клиенте: исправлено верно {rt_right:.1%} | ложных: русских {f_ru:.2%}, английских {f_en:.2%}"
         )
-    out = DATA / f"eval_{split}.txt"
+    out = DATA / f"eval_{split}_{ckpt}.txt"
     out.write_text("\n".join(lines), encoding="utf-8")
     print(out)

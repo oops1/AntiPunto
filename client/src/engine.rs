@@ -283,17 +283,22 @@ impl Buffer {
         else {
             return false;
         };
-        let delta = chs.len() as isize - (b - a) as isize;
+        let n = chs.len();
+        let delta = n as isize - (b - a) as isize;
         self.chars.splice(a..b, chs);
-        let start = self.spans(self.chars.len()).into_iter().map(|s| s.0).filter(|&s| s <= a).max().unwrap_or(a);
         for w in &mut self.seen {
             if w.start > a {
                 w.start = (w.start as isize + delta) as usize;
             }
         }
-        match self.seen.iter_mut().find(|w| w.start == start) {
-            Some(w) => w.done = true,
-            None => self.seen.push(Seen { start, first_p: 0.0, done: true }),
+        // в разбивке «в чем» слов два: не трогать оба
+        let spans = self.spans(self.chars.len());
+        let first = spans.iter().map(|s| s.0).filter(|&s| s <= a).max().unwrap_or(a);
+        for start in spans.into_iter().map(|s| s.0).filter(|&s| s >= first && s < a + n) {
+            match self.seen.iter_mut().find(|w| w.start == start) {
+                Some(w) => w.done = true,
+                None => self.seen.push(Seen { start, first_p: 0.0, done: true }),
+            }
         }
         true
     }
@@ -401,5 +406,17 @@ mod tests {
         assert_eq!(s, "в магазин ");
         // слово помечено: модель раскладки его больше не тронет
         assert!(b.seen.iter().any(|w| w.start == 2 && w.done));
+    }
+
+    #[test]
+    fn replace_word_splits_in_two() {
+        let mut b = typed("я тутже ", RU);
+        let (a, e, ..) = b.spell_target().unwrap();
+        assert!(b.replace_word(a, e, "тут же"));
+        let s: String = b.chars.iter().map(Ch::render).collect();
+        assert_eq!(s, "я тут же ");
+        // обе части разбивки помечены
+        assert!(b.seen.iter().any(|w| w.start == 2 && w.done));
+        assert!(b.seen.iter().any(|w| w.start == 6 && w.done));
     }
 }

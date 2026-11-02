@@ -78,7 +78,7 @@ if __name__ == "__main__":
         x = torch.zeros((K, L), dtype=torch.long)
         x[0] = torch.tensor(row(ctx, w, w))
         for j, c in enumerate(cands, 1):
-            x[j] = torch.tensor(row(ctx, w, c, j, osa(w, c), d.freq[c]))
+            x[j] = torch.tensor(row(ctx, w, c, j, osa(w, c), d.freq_of(c)))
         with torch.no_grad():
             s = net(x)[: len(cands) + 1]
         p = torch.softmax(s, 0)

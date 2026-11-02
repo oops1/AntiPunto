@@ -13,9 +13,15 @@ import paths
 from layouts import ROWS
 
 K = 16  # кандидатов в группе; 0-й — «оставить как есть»
+SPLITS = 3  # разбивок слитного набора среди кандидатов, не больше
+SHORT_FREQ = 8000  # часть разбивки до 3 букв — только частое слово («ко» да, «ка» нет)
 CTX, WLEN = 40, 20
 L = CTX + 2 * WLEN + 2 + 3  # контекст, SEP, набранное, SEP, кандидат, 3 признака
 ALPHABET = {"ru": "абвгдеёжзийклмнопрстуфхцчшщъыьэюя", "en": "abcdefghijklmnopqrstuvwxyz"}
+# однобуквенные слова, которые могут стоять отдельно при разбивке слитного набора
+SINGLE = {"ru": "авикосуя", "en": "ai"}
+# клавиши над пробелом: задели вместо него («приветькак»)
+SPACE_KEYS = {"ru": "чсмитьб", "en": "xcvbnm"}
 CHARS = " " + ALPHABET["ru"] + ALPHABET["en"] + "0123456789.,!?;:-'\"()"
 PAD, SEP, UNK = 0, 1, 2
 CHAR_ID = {c: i + 3 for i, c in enumerate(CHARS)}
@@ -56,7 +62,10 @@ class Dictionary:
     def __init__(self, lang: str, top: int | None = None):
         rows = [l.split("\t") for l in (paths.ROOT / "spell" / f"{lang}.tsv").read_text(encoding="utf-8").splitlines()]
         rows = rows[:top] if top else rows
+        self.lang = lang
         self.alpha = ALPHABET[lang]
+        self.single = SINGLE[lang]
+        self.space_keys = SPACE_KEYS[lang]
         self.words = [w for w, _ in rows]
         self.freq = {w: int(c) for w, c in rows}
         self.deletes: dict[str, list[int]] = {}
@@ -72,16 +81,55 @@ class Dictionary:
             for i in self.deletes.get(k, ()):
                 found.add(self.words[i])
 
+    def freq_of(self, w: str) -> int:
+        """Частота слова; у разбивки «в чем» — меньшая из частей."""
+        return min(self.freq.get(p, 0) for p in w.split(" "))
+
+    def part_ok(self, w: str) -> bool:
+        if len(w) == 1:
+            return w in self.single
+        return len(w) > 3 or self.freq.get(w, 0) >= SHORT_FREQ
+
+    def part(self, p: str) -> list[tuple[str, int]]:
+        """Часть разбивки: само слово (0 правок) или два самых частых в одной правке."""
+        if p in self.freq:
+            return [(p, 0)] if self.part_ok(p) else []
+        if len(p) < 3:
+            return []
+        found: set[str] = set()
+        self.near(p, found)
+        best = sorted((-self.freq[w], w) for w in found if len(w) > 1 and self.part_ok(w) and osa(p, w) == 1)
+        return [(w, 1) for _, w in best[:2]]
+
+    def splits(self, typed: str) -> set[str]:
+        """Пропущенный пробел: «вчем» → «в чем»; пробел мог стать соседней буквой («приветькак»)."""
+        out = set()
+        for i in range(1, len(typed)):
+            for skip in (0, 1):
+                if skip and (i + 1 >= len(typed) or typed[i] not in self.space_keys):
+                    continue
+                rights = self.part(typed[i + skip :])
+                for lw, le in self.part(typed[:i]) if rights else ():
+                    for rw, re_ in rights:
+                        if le + re_ + skip <= 2:
+                            out.add(f"{lw} {rw}")
+        return out
+
     def candidates(self, typed: str) -> list[str]:
-        """Словарные слова в пределах 2 правок, лучшие первыми."""
+        """Словарные слова в пределах 2 правок и до SPLITS разбивок на два слова, лучшие первыми."""
         found: set[str] = set()
         self.near(typed, found)
         # вторая правка: от каждого варианта набранного в одну правку
         for v in edits1(typed, self.alpha):
             self.near(v, found)
         found.discard(typed)
-        scored = [(osa(typed, w), -self.freq[w], w) for w in found]
-        return [w for d, _, w in sorted(scored) if d <= 2][: K - 1]
+        words = sorted((osa(typed, w), -self.freq[w], w) for w in found)
+        words = [s for s in words if s[0] <= 2]
+        # разбивка — это ещё и вставленный пробел: ей допускаем на правку больше
+        parts = sorted((osa(typed, w), -self.freq_of(w), w) for w in self.splits(typed))
+        parts = [s for s in parts if s[0] <= 3][:SPLITS]
+        keep = words[: K - 1 - len(parts)] + parts
+        return [w for _, _, w in sorted(keep)]
 
 
 def deletes1(w: str) -> set[str]:

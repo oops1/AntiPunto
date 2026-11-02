@@ -29,6 +29,16 @@ fn freq_bucket(f: u32) -> i32 {
 
 const ALPHA_RU: &str = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя";
 const ALPHA_EN: &str = "abcdefghijklmnopqrstuvwxyz";
+/// Однобуквенные слова, допустимые как часть разбивки слитного набора.
+const SINGLE_RU: &str = "авикосуя";
+const SINGLE_EN: &str = "ai";
+/// Клавиши над пробелом: задели вместо него («приветькак»).
+const SPACE_RU: &str = "чсмитьб";
+const SPACE_EN: &str = "xcvbnm";
+/// Разбивок среди кандидатов не больше.
+const SPLITS: usize = 3;
+/// Часть разбивки до 3 букв — только частое слово.
+const SHORT_FREQ: u32 = 8000;
 
 /// FNV-1a по символам, без символа skip (для удалений без копирования).
 fn fnv_skip(s: &[char], skip: usize) -> u32 {
@@ -135,6 +145,8 @@ pub struct Dict {
     /// Хеши слов без одной буквы.
     deletes: Index,
     alpha: Vec<char>,
+    single: Vec<char>,
+    space_keys: Vec<char>,
 }
 
 impl Dict {
@@ -156,8 +168,17 @@ impl Dict {
             offs.push(text.len() as u32);
         }
         text.shrink_to_fit();
-        let alpha = if ru { ALPHA_RU } else { ALPHA_EN }.chars().collect();
-        Ok(Dict { text, offs, freq, exact: Index::new(exact), deletes: Index::new(deletes), alpha })
+        let pick = |a: &str, b: &str| if ru { a } else { b }.chars().collect();
+        Ok(Dict {
+            text,
+            offs,
+            freq,
+            exact: Index::new(exact),
+            deletes: Index::new(deletes),
+            alpha: pick(ALPHA_RU, ALPHA_EN),
+            single: pick(SINGLE_RU, SINGLE_EN),
+            space_keys: pick(SPACE_RU, SPACE_EN),
+        })
     }
 
     fn word(&self, i: u32) -> &str {
@@ -173,8 +194,69 @@ impl Dict {
         self.id(w).is_some()
     }
 
+    /// Частота слова; у разбивки «в чем» — меньшая из частей.
     pub fn freq_of(&self, w: &str) -> u32 {
-        self.id(w).map_or(0, |i| self.freq[i as usize])
+        w.split(' ').map(|p| self.id(p).map_or(0, |i| self.freq[i as usize])).min().unwrap_or(0)
+    }
+
+    fn part_ok(&self, w: &[char], f: u32) -> bool {
+        match w.len() {
+            1 => self.single.contains(&w[0]),
+            2 | 3 => f >= SHORT_FREQ,
+            _ => true,
+        }
+    }
+
+    /// Часть разбивки: само слово (0 правок) или два самых частых в одной правке (как part в Python).
+    fn part(&self, p: &[char]) -> Vec<(u32, usize)> {
+        let s: String = p.iter().collect();
+        if let Some(i) = self.id(&s) {
+            return if self.part_ok(p, self.freq[i as usize]) { vec![(i, 0)] } else { Vec::new() };
+        }
+        if p.len() < 3 {
+            return Vec::new();
+        }
+        let mut found = Vec::new();
+        self.near(p, &mut found);
+        found.sort_unstable();
+        found.dedup();
+        let mut best: Vec<(i64, &str, u32)> = found
+            .into_iter()
+            .filter_map(|i| {
+                let w = self.word(i);
+                let wc: Vec<char> = w.chars().collect();
+                let f = self.freq[i as usize];
+                (wc.len() > 1 && self.part_ok(&wc, f) && osa(p, &wc) == 1).then_some((-(f as i64), w, i))
+            })
+            .collect();
+        best.sort();
+        best.into_iter().take(2).map(|(_, _, i)| (i, 1)).collect()
+    }
+
+    /// Пропущенный пробел: «вчем» → «в чем»; пробел мог стать соседней буквой («приветькак»).
+    fn splits(&self, t: &[char]) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 1..t.len() {
+            for skip in 0..2 {
+                if skip == 1 && (i + 1 >= t.len() || !self.space_keys.contains(&t[i])) {
+                    continue;
+                }
+                let rights = self.part(&t[i + skip..]);
+                if rights.is_empty() {
+                    continue;
+                }
+                for (l, le) in self.part(&t[..i]) {
+                    for &(r, re) in &rights {
+                        if le + re + skip <= 2 {
+                            out.push(format!("{} {}", self.word(l), self.word(r)));
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Номера слов в одной правке от v (удаление с каждой стороны); с лишними — их отсечёт osa.
@@ -186,7 +268,7 @@ impl Dict {
         }
     }
 
-    /// Все словарные слова в пределах 2 правок: (расстояние, −частота, слово), лучшие первыми.
+    /// Словарные слова в пределах 2 правок и до SPLITS разбивок: (расстояние, −частота, слово), лучшие первыми.
     pub fn candidates(&self, typed: &str) -> Vec<String> {
         let t: Vec<char> = typed.chars().collect();
         let mut found = Vec::new();
@@ -196,15 +278,27 @@ impl Dict {
         }
         found.sort_unstable();
         found.dedup();
-        let mut scored: Vec<(usize, i64, &str)> = found
+        let mut words: Vec<(usize, i64, String)> = found
             .into_iter()
             .map(|i| (i, self.word(i)))
             .filter(|&(_, w)| w != typed)
-            .map(|(i, w)| (osa(&t, &w.chars().collect::<Vec<_>>()), -(self.freq[i as usize] as i64), w))
+            .map(|(i, w)| (osa(&t, &w.chars().collect::<Vec<_>>()), -(self.freq[i as usize] as i64), w.to_string()))
             .filter(|&(d, _, _)| d <= 2)
             .collect();
-        scored.sort();
-        scored.into_iter().take(K - 1).map(|(_, _, w)| w.to_string()).collect()
+        words.sort();
+        // разбивка — это ещё и вставленный пробел: ей допускаем на правку больше
+        let mut parts: Vec<(usize, i64, String)> = self
+            .splits(&t)
+            .into_iter()
+            .map(|s| (osa(&t, &s.chars().collect::<Vec<_>>()), -(self.freq_of(&s) as i64), s))
+            .filter(|&(d, _, _)| d <= 3)
+            .collect();
+        parts.sort();
+        parts.truncate(SPLITS);
+        words.truncate(K - 1 - parts.len());
+        words.extend(parts);
+        words.sort();
+        words.into_iter().map(|(_, _, w)| w).collect()
     }
 }
 
@@ -366,7 +460,7 @@ mod tests {
         for line in fixture.lines() {
             let mut parts = line.split('\t');
             let (lang, typed) = (parts.next().unwrap(), parts.next().unwrap());
-            let want: Vec<&str> = parts.next().unwrap_or("").split(' ').filter(|s| !s.is_empty()).collect();
+            let want: Vec<&str> = parts.next().unwrap_or("").split('|').filter(|s| !s.is_empty()).collect();
             let d = if lang == "ru" { &ru } else { &en };
             assert_eq!(d.candidates(typed), want, "{typed}");
             n += 1;

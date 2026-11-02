@@ -65,14 +65,16 @@ def write_fixture():
     rng = random.Random(7)
     fixed = {
         "ru": ["преокт", "магазн", "пониаю", "черерез", "видеш", "коментари", "каежстя", "сесию", "подключаюсб",
-               "удететь", "пливет", "езжик", "рабоате", "ёжк"],
-        "en": ["problme", "teh", "recieve", "godo", "fiel"],
+               "удететь", "пливет", "езжик", "рабоате", "ёжк", "вчем", "тутже", "выпустирелиз", "неблоы",
+               "воригинае", "приветькак", "проверьналичие", "модлельвклчюить"],
+        "en": ["problme", "teh", "recieve", "godo", "fiel", "ithink", "thisis", "goodidea"],
     }
     lines = []
     for lang, n in (("ru", 60), ("en", 30)):
         d = Dictionary(lang)
         words = fixed[lang] + [corrupt(w, lang, rng) for w in rng.sample(d.words[:20000], n)]
-        lines += [f"{lang}\t{w}\t{' '.join(d.candidates(w))}" for w in words if w not in d.freq]
+        # «|» между кандидатами: в разбивках есть пробел
+        lines += [f"{lang}\t{w}\t{'|'.join(d.candidates(w))}" for w in words if w not in d.freq]
     out = Path(__file__).resolve().parent.parent / "client" / "tests" / "spell_candidates.tsv"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("фикстура кандидатов:", len(lines))

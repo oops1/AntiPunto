@@ -31,7 +31,7 @@ def load_cases():
     counts = dict(l.split("\t")[:2] for l in (DATA / "real_ru_unlabeled.tsv").read_text(encoding="utf-8").splitlines()[1:])
     for line in lines:
         w, label, cls = line.split("\t")[:3]
-        if cls in ("typo", "jargon_typo") and " " not in label:
+        if (cls in ("typo", "jargon_typo") and " " not in label) or cls == "split":
             cases.append((w, label.replace("ё", "е"), ctx.get(w, ""), int(counts.get(w, 1))))
         elif cls == "keep":
             cases.append((w, None, ctx.get(w, ""), int(counts.get(w, 1))))
@@ -48,7 +48,7 @@ def choose(net, d: Dictionary, known: Bloom, ctx: str, w: str):
     x = torch.zeros((K, L), dtype=torch.long)
     x[0] = torch.tensor(row(ctx, w, w))
     for j, c in enumerate(cands, 1):
-        x[j] = torch.tensor(row(ctx, w, c, j, osa(w, c), d.freq[c]))
+        x[j] = torch.tensor(row(ctx, w, c, j, osa(w, c), d.freq_of(c)))
     with torch.no_grad():
         p = torch.softmax(net(x)[: len(cands) + 1], 0)
     b = int(p.argmax())
@@ -60,6 +60,7 @@ if __name__ == "__main__":
     cases = load_cases()
     typos = [c for c in cases if c[1]]
     keeps = [c for c in cases if not c[1]]
+    n_split = sum(1 for c in typos if " " in c[1])
     lines = [f"опечаток {len(typos)}, правильных {len(keeps)}"]
     # потолок: верный ответ среди кандидатов
     reach = sum(1 for w, t, *_ in typos if w not in d.freq and w not in known and t in d.candidates(w))
@@ -70,17 +71,19 @@ if __name__ == "__main__":
         res = [(c, choose(net, d, known, c[2], c[0])) for c in cases]
         lines.append(f"== {name}")
         for t in THRESHOLDS:
-            right = wrong = false = 0
+            right = wrong = false = split_right = 0
             for (w, target, _, _), r in res:
                 acted = r is not None and r[0] != w and r[1] >= t
                 if target:
-                    right += acted and r[0].replace("ё", "е") == target
+                    ok = acted and r[0].replace("ё", "е") == target
+                    right += ok
+                    split_right += ok and " " in target
                     wrong += acted and r[0].replace("ё", "е") != target
                 else:
                     false += acted
             lines.append(
                 f"  порог {t:.2f}: исправлено верно {right / len(typos):.1%}, неверно {wrong / len(typos):.1%}"
-                f" | испорчено правильных {false}/{len(keeps)}"
+                f" | испорчено правильных {false}/{len(keeps)} | слитных верно {split_right}/{n_split}"
             )
     out = DATA / "real_eval.txt"
     out.write_text("\n".join(lines), encoding="utf-8")

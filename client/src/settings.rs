@@ -34,3 +34,23 @@ pub fn set_spell(on: bool) {
     SPELL.store(on, SeqCst);
     put(w!("Spell"), on as u32);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::System::Registry::RegDeleteKeyValueW;
+
+    #[test]
+    fn registry_roundtrip() {
+        let name = w!("TestValue");
+        assert_eq!(get(name), None);
+        put(name, 0);
+        assert_eq!(get(name), Some(0));
+        put(name, 1);
+        assert_eq!(get(name), Some(1));
+        unsafe {
+            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, KEY, name);
+        }
+        assert_eq!(get(name), None);
+    }
+}

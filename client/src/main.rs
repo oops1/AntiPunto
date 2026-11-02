@@ -8,6 +8,7 @@ mod input;
 mod keymap;
 mod lists;
 mod ov;
+mod settings;
 mod spell;
 mod stats;
 mod tray;
@@ -254,6 +255,11 @@ fn main() {
         let _mutex = CreateMutexW(None, false, w!("AntiPunto_single"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return;
+        }
+        settings::load();
+        if !cfg.spell {
+            // --no-spell: только на этот запуск
+            settings::SPELL.store(false, std::sync::atomic::Ordering::SeqCst);
         }
         tray::set_status("загрузка модели…".into());
         let (tx, rx) = channel();

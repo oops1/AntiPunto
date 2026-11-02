@@ -23,7 +23,7 @@ use crate::ov::Model;
 use crate::spell::Speller;
 use crate::stats::{Saver, Stats};
 use crate::tray::{READY, fence, set_status};
-use crate::{Config, input, load_model, load_speller};
+use crate::{Config, input, load_model, load_speller, settings};
 
 #[derive(Default)]
 struct Mods {
@@ -72,6 +72,7 @@ struct Worker {
     rctrl_clean: bool,
     rctrl_tap: Option<Instant>,
     speller: Option<Speller>,
+    speller_failed: bool,
 }
 
 /// Программа, где печатали последней: для пункта меню «не исправлять здесь».
@@ -232,8 +233,35 @@ impl Worker {
         }
     }
 
+    /// Загрузить орфографию, если она включена и ещё не загружена.
+    fn ensure_speller(&mut self) {
+        if self.speller.is_some() || self.speller_failed || !settings::SPELL.load(SeqCst) {
+            return;
+        }
+        let t = Instant::now();
+        match load_speller(&self.cfg) {
+            Ok(s) => {
+                self.speller = Some(s);
+                if self.cfg.debug {
+                    println!("орфография загружена за {:?}", t.elapsed());
+                }
+            }
+            Err(e) => {
+                self.speller_failed = true;
+                if self.cfg.debug {
+                    println!("орфография не загружена: {e}");
+                }
+            }
+        }
+    }
+
     /// Орфография последнего слова с учётом правки раскладки: (a, b, новое слово, уверенность).
     fn spell_check(&mut self, plan: Option<&Plan>) -> Option<(usize, usize, String, f32)> {
+        if !settings::SPELL.load(SeqCst) {
+            self.speller = None; // выключили — освободить память
+            return None;
+        }
+        self.ensure_speller();
         let sp = self.speller.as_mut()?;
         let mut sim = self.buf.clone();
         if let Some(p) = plan {
@@ -444,23 +472,9 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
             return;
         }
     };
-    let speller = if cfg.spell {
-        match load_speller(&cfg) {
-            Ok(s) => Some(s),
-            Err(e) => {
-                if cfg.debug {
-                    println!("орфография выключена: {e}");
-                }
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let spell_note = if speller.is_some() { ", орфография" } else { "" };
-    set_status(format!("нейросеть на {}{spell_note}", model.device));
+    set_status(format!("нейросеть на {}", model.device));
     if cfg.debug {
-        println!("модель на {} за {:?}{spell_note}", model.device, t0.elapsed());
+        println!("модель на {} за {:?}", model.device, t0.elapsed());
     }
     READY.store(true, SeqCst);
     lists::ensure_files();
@@ -485,8 +499,10 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         stats,
         rctrl_clean: false,
         rctrl_tap: None,
-        speller,
+        speller: None,
+        speller_failed: false,
     };
+    w.ensure_speller();
     let mut pending = VecDeque::new();
     loop {
         let ev = match pending.pop_front() {

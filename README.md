@@ -1,7 +1,14 @@
 # AntiPunto
 
-Переключатель раскладки RU/EN для Windows, который решает **по смыслу фразы**, а не по одному слову.
-Решения принимает маленькая локальная нейросеть: она работает на NPU (Intel AI Boost), а без него — на процессоре.
+[![CI](https://github.com/oops1/AntiPunto/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oops1/AntiPunto/actions/workflows/ci.yml)
+[![Релиз](https://img.shields.io/github/v/release/oops1/AntiPunto?label=%D1%80%D0%B5%D0%BB%D0%B8%D0%B7)](https://github.com/oops1/AntiPunto/releases/latest)
+[![Загрузки](https://img.shields.io/github/downloads/oops1/AntiPunto/total?label=%D0%B7%D0%B0%D0%B3%D1%80%D1%83%D0%B7%D0%BA%D0%B8)](https://github.com/oops1/AntiPunto/releases)
+[![Windows 10/11](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6)](#требования)
+[![MIT](https://img.shields.io/github/license/oops1/AntiPunto)](LICENSE)
+
+Переключатель раскладки RU/EN для Windows, который решает **по смыслу фразы**, а не по одному слову,
+и **исправляет опечатки** («преокт» → «проект»).
+Решения принимают маленькие локальные нейросети: они работают на NPU (Intel AI Boost), а без него — на процессоре.
 Ничего не уходит в сеть, набранный текст нигде не сохраняется.
 
 ![Иконки](client/assets/preview.png)

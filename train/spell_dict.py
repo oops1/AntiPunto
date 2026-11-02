@@ -38,6 +38,10 @@ def build(lang: str, limit: int = 3_000_000) -> None:
     words = words[: TOP[lang]]
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"{lang}.tsv").write_text("".join(f"{w}\t{c}\n" for w, c in words), encoding="utf-8")
+    if lang == "ru":
+        from spell_jargon import add
+
+        add(OUT / "ru.tsv")
     # встречалось ≥5 раз, но не в словаре (жаргон, неологизмы): не исправлять
     in_dict = {w for w, _ in words}
     seen = [w for w, c in cnt.items() if c >= 5 and w not in in_dict]

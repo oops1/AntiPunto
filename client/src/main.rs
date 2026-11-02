@@ -57,7 +57,7 @@ fn config() -> (Config, Option<String>) {
         update_check: true,
         expect: None,
         spell: true,
-        spell_threshold: 0.90,
+        spell_threshold: 0.85,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);
@@ -131,6 +131,10 @@ fn spelltest(c: &Config, text: &str) -> Result<(), String> {
         let t = std::time::Instant::now();
         let fix = sp.suggest(&format!("{ctx}{}", String::from_iter(&chars[..lead])), &word, ru)?;
         let shown = match &fix {
+            Some((w, p)) if *w == word => {
+                println!("  «{word}» оставить {p:.2}");
+                word
+            }
             Some((w, p)) if *p >= sp.threshold => {
                 println!("  «{word}» → «{w}» {p:.2} ({:?})", t.elapsed());
                 w.clone()

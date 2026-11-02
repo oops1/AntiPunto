@@ -244,10 +244,14 @@ impl Worker {
             return None;
         }
         match sp.suggest(&ctx, &word, ru) {
-            Ok(Some((cand, p))) if p >= sp.threshold => Some((a, b, cand, p)),
+            Ok(Some((cand, p))) if cand != word && p >= sp.threshold => Some((a, b, cand, p)),
             Ok(Some((cand, p))) => {
                 if self.cfg.debug {
-                    println!("  орфография: «{word}» → «{cand}»? {p:.2} — ниже порога");
+                    if cand == word {
+                        println!("  орфография: «{word}» оставить {p:.2}");
+                    } else {
+                        println!("  орфография: «{word}» → «{cand}»? {p:.2} — ниже порога");
+                    }
                 }
                 None
             }

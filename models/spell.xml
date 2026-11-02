@@ -4549,16 +4549,34 @@
 				</port>
 			</output>
 		</layer>
-		<layer id="284" name="Constant_13516" type="Const" version="opset1">
-			<data element_type="f32" shape="1, 1" offset="1045494" size="4" />
+		<layer id="284" name="Constant_13516_compressed" type="Const" version="opset1">
+			<data element_type="f16" shape="1, 1" offset="1045494" size="2" />
 			<output>
-				<port id="0" precision="FP32">
+				<port id="0" precision="FP16">
 					<dim>1</dim>
 					<dim>1</dim>
 				</port>
 			</output>
 		</layer>
-		<layer id="285" name="__module.m.head/aten::linear/Add" type="Add" version="opset1">
+		<layer id="285" name="Constant_13516" type="Convert" version="opset1">
+			<data destination_type="f32" />
+			<rt_info>
+				<attribute name="decompression" version="0" />
+			</rt_info>
+			<input>
+				<port id="0" precision="FP16">
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="286" name="__module.m.head/aten::linear/Add" type="Add" version="opset1">
 			<data auto_broadcast="numpy" />
 			<input>
 				<port id="0" precision="FP32">
@@ -4577,7 +4595,7 @@
 				</port>
 			</output>
 		</layer>
-		<layer id="286" name="__module.m/aten::squeeze/Squeeze" type="Squeeze" version="opset1">
+		<layer id="287" name="__module.m/aten::squeeze/Squeeze" type="Squeeze" version="opset1">
 			<input>
 				<port id="0" precision="FP32">
 					<dim>16</dim>
@@ -4591,7 +4609,7 @@
 				</port>
 			</output>
 		</layer>
-		<layer id="287" name="Result_3939" type="Result" version="opset1">
+		<layer id="288" name="Result_3939" type="Result" version="opset1">
 			<input>
 				<port id="0" precision="FP32">
 					<dim>16</dim>
@@ -4901,10 +4919,10 @@
 		<edge from-layer="267" from-port="0" to-layer="268" to-port="1" />
 		<edge from-layer="268" from-port="2" to-layer="270" to-port="0" />
 		<edge from-layer="269" from-port="0" to-layer="270" to-port="1" />
-		<edge from-layer="269" from-port="0" to-layer="286" to-port="1" />
+		<edge from-layer="269" from-port="0" to-layer="287" to-port="1" />
 		<edge from-layer="270" from-port="2" to-layer="271" to-port="0" />
-		<edge from-layer="271" from-port="1" to-layer="276" to-port="0" />
 		<edge from-layer="271" from-port="1" to-layer="272" to-port="1" />
+		<edge from-layer="271" from-port="1" to-layer="276" to-port="0" />
 		<edge from-layer="272" from-port="2" to-layer="274" to-port="0" />
 		<edge from-layer="273" from-port="0" to-layer="274" to-port="1" />
 		<edge from-layer="274" from-port="2" to-layer="280" to-port="0" />
@@ -4916,10 +4934,11 @@
 		<edge from-layer="280" from-port="2" to-layer="283" to-port="0" />
 		<edge from-layer="281" from-port="0" to-layer="282" to-port="0" />
 		<edge from-layer="282" from-port="1" to-layer="283" to-port="1" />
-		<edge from-layer="283" from-port="2" to-layer="285" to-port="0" />
-		<edge from-layer="284" from-port="0" to-layer="285" to-port="1" />
-		<edge from-layer="285" from-port="2" to-layer="286" to-port="0" />
+		<edge from-layer="283" from-port="2" to-layer="286" to-port="0" />
+		<edge from-layer="284" from-port="0" to-layer="285" to-port="0" />
+		<edge from-layer="285" from-port="1" to-layer="286" to-port="1" />
 		<edge from-layer="286" from-port="2" to-layer="287" to-port="0" />
+		<edge from-layer="287" from-port="2" to-layer="288" to-port="0" />
 	</edges>
 	<rt_info>
 		<info name="OpenVINO Runtime" value="2026.4.1-22982-e213a147257-releases/2026/4" />

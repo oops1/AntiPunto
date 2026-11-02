@@ -218,7 +218,7 @@ impl Speller {
         if ru { &self.ru } else { &self.en }
     }
 
-    /// Лучший кандидат и его вероятность; None — оставить как есть.
+    /// Выбор модели и его вероятность (выбор == typed — оставить); None — не спрашивали.
     pub fn suggest(&mut self, ctx: &str, typed: &str, ru: bool) -> Result<Option<(String, f32)>, String> {
         let d = self.dict(ru);
         if d.contains(typed) || self.known.as_ref().is_some_and(|k| k.contains(typed)) {
@@ -245,7 +245,7 @@ impl Speller {
         let sum: f32 = e.iter().sum();
         let (best, p) =
             e.iter().enumerate().map(|(i, v)| (i, v / sum)).fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
-        Ok((best != 0).then(|| (opts[best].to_string(), p)))
+        Ok(Some((opts[best].to_string(), p)))
     }
 }
 

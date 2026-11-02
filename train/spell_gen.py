@@ -5,6 +5,7 @@ import multiprocessing as mp
 import random
 import re
 import sys
+import zlib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -13,18 +14,26 @@ import numpy as np
 
 import paths
 from spell_common import K, L, Dictionary, corrupt, osa, row
+from spell_keep import Bloom
+from spell_known import MODELS
 
 WORDS = {"ru": re.compile(r"[а-яё]+"), "en": re.compile(r"[a-z]+")}
 P_KEEP = 0.35  # доля групп «правильное редкое слово — не трогать»
 
 _dicts: dict[str, Dictionary] = {}
-_rare: dict[str, list[str]] = {}
+_keep: dict[str, list[str]] = {}
+_known: Bloom | None = None
 
 
-def init():
+def init(split: str):
+    global _known
+    _known = Bloom(MODELS / "spell_known.bloom")
     for lang in ("ru", "en"):
         _dicts[lang] = Dictionary(lang)
-        _rare[lang] = (paths.ROOT / "spell" / f"{lang}_rare.txt").read_text(encoding="utf-8").split("\n")
+        # только слова, которые клиент покажет модели (spell_keep.py); тест — на невиданных
+        words = (paths.ROOT / "spell" / f"{lang}_keep.txt").read_text(encoding="utf-8").split("\n")
+        held = split != "train"
+        _keep[lang] = [w for w in words if (zlib.crc32(w.encode()) % 10 == 0) == held]
 
 
 def group(lang: str, sent: str, rng: random.Random):
@@ -37,15 +46,15 @@ def group(lang: str, sent: str, rng: random.Random):
     ctx = sent[:a]
     word = sent[a:b].lower()
     if rng.random() < P_KEEP:
-        typed, target = rng.choice(_rare[lang]), None
+        typed, target = rng.choice(_keep[lang]), None
         if typed in d.freq:
             return None
     else:
         if word not in d.freq:
             return None
         typed, target = corrupt(word, lang, rng), word
-        if typed == word or typed in d.freq:
-            return None  # пока только «не слова»
+        if typed == word or typed in d.freq or typed in _known:
+            return None  # клиент известные слова модели не показывает
     cands = d.candidates(typed)
     if target is not None and target not in cands:
         return None
@@ -94,7 +103,7 @@ if __name__ == "__main__":
         items = [("ru" if rng.random() < 0.7 else "en",) for _ in range(min(20000, a.n - c))]
         items = [(l[0], rng.choice(sents[l[0]])) for l in items]
         jobs.append((rng.getrandbits(32), items))
-    with mp.Pool(a.procs, initializer=init) as pool:
+    with mp.Pool(a.procs, initializer=init, initargs=(a.split,)) as pool:
         parts = pool.map(work, jobs)
     X, M, Y = (np.concatenate([p[i] for p in parts]) for i in range(3))
     np.savez(paths.ROOT / "spell" / f"{a.split}.npz", x=X, m=M, y=Y)

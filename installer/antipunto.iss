@@ -53,6 +53,7 @@ Name: "{userprograms}\AntiPunto"; Filename: "{app}\antipunto.exe"
 
 [Registry]
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "AntiPunto"; ValueData: """{app}\antipunto.exe"""; Tasks: autostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\AntiPunto"; Flags: uninsdeletekey
 
 [Run]
 Filename: "{app}\antipunto.exe"; Description: "{cm:LaunchNow}"; Flags: nowait postinstall

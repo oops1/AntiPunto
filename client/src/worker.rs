@@ -14,15 +14,16 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 use windows::core::PWSTR;
 
-use crate::engine::{Buffer, Ch};
+use crate::engine::{Buffer, Ch, Plan};
 use crate::focus::Focus;
 use crate::hook::{CORRECTING, Event, HAS_WORD, Key, UNDO_READY, is_modifier};
 use crate::keymap::{KEYMAP, OTHER, SPACE};
 use crate::lists::{self, Lists};
 use crate::ov::Model;
+use crate::spell::Speller;
 use crate::stats::{Saver, Stats};
 use crate::tray::{READY, fence, set_status};
-use crate::{Config, input, load_model};
+use crate::{Config, input, load_model, load_speller, settings};
 
 #[derive(Default)]
 struct Mods {
@@ -70,6 +71,8 @@ struct Worker {
     /// Двойной правый Ctrl: нажатие без других клавиш и время прошлого.
     rctrl_clean: bool,
     rctrl_tap: Option<Instant>,
+    speller: Option<Speller>,
+    speller_failed: bool,
 }
 
 /// Программа, где печатали последней: для пункта меню «не исправлять здесь».
@@ -230,6 +233,60 @@ impl Worker {
         }
     }
 
+    /// Загрузить орфографию, если она включена и ещё не загружена.
+    fn ensure_speller(&mut self) {
+        if self.speller.is_some() || self.speller_failed || !settings::SPELL.load(SeqCst) {
+            return;
+        }
+        let t = Instant::now();
+        match load_speller(&self.cfg) {
+            Ok(s) => {
+                self.speller = Some(s);
+                if self.cfg.debug {
+                    println!("орфография загружена за {:?}", t.elapsed());
+                }
+            }
+            Err(e) => {
+                self.speller_failed = true;
+                if self.cfg.debug {
+                    println!("орфография не загружена: {e}");
+                }
+            }
+        }
+    }
+
+    /// Орфография последнего слова с учётом правки раскладки: (a, b, новое слово, уверенность).
+    fn spell_check(&mut self, plan: Option<&Plan>) -> Option<(usize, usize, String, f32)> {
+        if !settings::SPELL.load(SeqCst) {
+            self.speller = None; // выключили — освободить память
+            return None;
+        }
+        self.ensure_speller();
+        let sp = self.speller.as_mut()?;
+        let mut sim = self.buf.clone();
+        if let Some(p) = plan {
+            sim.apply(p.clone());
+        }
+        let (a, b, word, ctx, ru) = sim.spell_target()?;
+        if self.lists.ignore.contains(&word) || self.lists.force.contains(&word) {
+            return None;
+        }
+        match sp.suggest(&ctx, &word, ru) {
+            Ok(Some((cand, p))) if cand != word && p >= sp.threshold => Some((a, b, cand, p)),
+            Ok(Some((cand, p))) => {
+                if self.cfg.debug {
+                    if cand == word {
+                        println!("  орфография: «{word}» оставить {p:.2}");
+                    } else {
+                        println!("  орфография: «{word}» → «{cand}»? {p:.2} — ниже порога");
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Pause/Break: отменить последнюю правку или перевернуть последнее слово.
     fn pause(&mut self) {
         if let Some(u) = self.undo.take() {
@@ -314,13 +371,16 @@ impl Worker {
         let plan = self.buf.plan(&mut self.model, self.cfg.threshold, &self.lists);
         self.stats.infer_us += t.elapsed().as_micros() as u64;
         let plan = match plan {
-            Ok(Some(p)) => p,
-            Ok(None) => return,
+            Ok(p) => p,
             Err(e) => {
                 set_status(format!("ошибка прогона: {e}"));
                 return;
             }
         };
+        let spell = self.spell_check(plan.as_ref());
+        if plan.is_none() && spell.is_none() {
+            return;
+        }
         CORRECTING.store(true, SeqCst);
         fence();
         // всё, что прошло до флага, уже на экране
@@ -356,24 +416,43 @@ impl Worker {
         if after.is_empty() {
             let before = self.buf.clone();
             let old_lay = before.chars.iter().rev().find(|c| !KEYMAP.neutral(c.tok)).map_or(0, |c| c.lay);
-            let fix = self.buf.apply(plan);
-            if !input::replace(fix.erase, &fix.text) {
-                self.buf.clear();
-            } else {
-                self.stats.fixes += 1;
-                *self.stats.by_app.entry(self.proc_name.clone()).or_default() += 1;
-                self.undo = Some(Undo { before, text: fix.text.clone(), old: fix.old.clone(), old_lay });
-                // Backspace отменяет, только если после правки ничего не набрано
-                if !typed_more {
-                    UNDO_READY.store(true, SeqCst);
-                }
+            let mut first = usize::MAX;
+            let mut switch = None;
+            if let Some(plan) = plan {
+                let fix = self.buf.apply(plan);
+                first = before.chars.len() - fix.erase;
                 if fix.last_flipped {
-                    input::switch_layout(fix.new_lay);
-                    self.target_lay = Some(fix.new_lay);
+                    switch = Some(fix.new_lay);
                 }
             }
-            if self.cfg.debug {
-                println!("«{}» → «{}»", fix.old, fix.text);
+            if let Some((a, b, new, _)) = &spell
+                && self.buf.replace_word(*a, *b, new)
+            {
+                first = first.min(*a);
+                self.stats.spell_fixes += 1;
+            }
+            if first < before.chars.len() {
+                let old: String = before.chars[first..].iter().map(Ch::render).collect();
+                let text: String = self.buf.chars[first..].iter().map(Ch::render).collect();
+                if !input::replace(before.chars.len() - first, &text) {
+                    self.buf.clear();
+                } else {
+                    self.stats.fixes += 1;
+                    *self.stats.by_app.entry(self.proc_name.clone()).or_default() += 1;
+                    if self.cfg.debug {
+                        let p = spell.as_ref().map_or(String::new(), |s| format!(" (орфография {:.2})", s.3));
+                        println!("«{old}» → «{text}»{p}");
+                    }
+                    self.undo = Some(Undo { before, text, old, old_lay });
+                    // Backspace отменяет, только если после правки ничего не набрано
+                    if !typed_more {
+                        UNDO_READY.store(true, SeqCst);
+                    }
+                    if let Some(lay) = switch {
+                        input::switch_layout(lay);
+                        self.target_lay = Some(lay);
+                    }
+                }
             }
         }
         CORRECTING.store(false, SeqCst);
@@ -420,7 +499,10 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         stats,
         rctrl_clean: false,
         rctrl_tap: None,
+        speller: None,
+        speller_failed: false,
     };
+    w.ensure_speller();
     let mut pending = VecDeque::new();
     loop {
         let ev = match pending.pop_front() {

@@ -28,6 +28,19 @@ fn real_short_word(word: &[Ch]) -> bool {
     list.contains(&w.as_str())
 }
 
+/// Слово для орфографии: (кавычки слева, знаки справа, русское ли).
+pub fn spell_core(text: &[char]) -> Option<(usize, usize, bool)> {
+    let lead = text.iter().take_while(|c| "(\"«'".contains(**c)).count();
+    let trail = text.iter().rev().take_while(|c| ".,!?;:)\"»'".contains(**c)).count();
+    if lead + trail >= text.len() {
+        return None;
+    }
+    let core = &text[lead..text.len() - trail];
+    let ru = core.iter().all(|&c| ('а'..='я').contains(&c) || c == 'ё');
+    let en = core.iter().all(|c| c.is_ascii_lowercase());
+    ((3..=20).contains(&core.len()) && (ru || en)).then_some((lead, trail, ru))
+}
+
 #[derive(Clone, Copy)]
 pub struct Ch {
     pub tok: u8,
@@ -50,6 +63,7 @@ impl Ch {
 }
 
 /// Что поменять: слово и нужная раскладка; буфер ещё не тронут.
+#[derive(Clone)]
 pub struct Plan {
     flips: Vec<(usize, usize, u8)>,
     first: usize,
@@ -246,6 +260,44 @@ impl Buffer {
         }
     }
 
+    /// Последнее законченное слово для орфографии: границы его букв, сами буквы,
+    /// контекст слева и язык (true — русский). Только строчные буквы одного алфавита.
+    pub fn spell_target(&self) -> Option<(usize, usize, String, String, bool)> {
+        let mut end = self.chars.len();
+        while end > 0 && self.chars[end - 1].tok == SPACE {
+            end -= 1;
+        }
+        let &(a, b) = self.spans(end).last()?;
+        let text: Vec<char> = self.chars[a..b].iter().map(Ch::render).collect();
+        let (lead, trail, ru) = spell_core(&text)?;
+        let core: String = text[lead..text.len() - trail].iter().collect();
+        let ctx: String = self.chars[..a + lead].iter().map(Ch::render).collect();
+        Some((a + lead, b - trail, core, ctx, ru))
+    }
+
+    /// Заменить символы [a, b) словом new в раскладке слова; слово больше не трогать.
+    pub fn replace_word(&mut self, a: usize, b: usize, new: &str) -> bool {
+        let lay = self.chars[a].lay;
+        let Some(chs): Option<Vec<Ch>> =
+            new.chars().map(|c| KEYMAP.token_of(c, lay).map(|t| Ch::new(t, lay, c))).collect()
+        else {
+            return false;
+        };
+        let delta = chs.len() as isize - (b - a) as isize;
+        self.chars.splice(a..b, chs);
+        let start = self.spans(self.chars.len()).into_iter().map(|s| s.0).filter(|&s| s <= a).max().unwrap_or(a);
+        for w in &mut self.seen {
+            if w.start > a {
+                w.start = (w.start as isize + delta) as usize;
+            }
+        }
+        match self.seen.iter_mut().find(|w| w.start == start) {
+            Some(w) => w.done = true,
+            None => self.seen.push(Seen { start, first_p: 0.0, done: true }),
+        }
+        true
+    }
+
     /// Pause/Break: перевернуть последнее слово, что бы ни думала модель.
     pub fn flip_last(&mut self) -> Option<Fix> {
         let mut end = self.chars.len();
@@ -319,5 +371,35 @@ mod tests {
         assert!(real_short_word(&typed("на", RU).chars));
         assert!(real_short_word(&typed("is", EN).chars));
         assert!(!real_short_word(&typed("yf", EN).chars));
+    }
+
+    #[test]
+    fn spell_target_strips_punctuation() {
+        let b = typed("я создал преокт, ", RU);
+        let (a, e, word, ctx, ru) = b.spell_target().unwrap();
+        assert_eq!((word.as_str(), ctx.as_str(), ru), ("преокт", "я создал ", true));
+        assert_eq!((a, e), (9, 15));
+    }
+
+    #[test]
+    fn spell_target_skips_capitals_and_short() {
+        assert!(typed("я видел Чукалина ", RU).spell_target().is_none());
+        assert!(typed("да ", RU).spell_target().is_none());
+    }
+
+    #[test]
+    fn replace_word_keeps_tail() {
+        let mut b = typed("я создал преокт, ", RU);
+        let (a, e, ..) = b.spell_target().unwrap();
+        assert!(b.replace_word(a, e, "проект"));
+        let s: String = b.chars.iter().map(Ch::render).collect();
+        assert_eq!(s, "я создал проект, ");
+        let mut b = typed("в магазн ", RU);
+        let (a, e, ..) = b.spell_target().unwrap();
+        assert!(b.replace_word(a, e, "магазин"));
+        let s: String = b.chars.iter().map(Ch::render).collect();
+        assert_eq!(s, "в магазин ");
+        // слово помечено: модель раскладки его больше не тронет
+        assert!(b.seen.iter().any(|w| w.start == 2 && w.done));
     }
 }

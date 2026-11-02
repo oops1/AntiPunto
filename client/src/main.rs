@@ -8,6 +8,8 @@ mod input;
 mod keymap;
 mod lists;
 mod ov;
+mod settings;
+mod spell;
 mod stats;
 mod tray;
 mod update;
@@ -36,6 +38,8 @@ pub struct Config {
     pub debug: bool,
     pub update_check: bool,
     pub expect: Option<String>,
+    pub spell: bool,
+    pub spell_threshold: f32,
 }
 
 fn config() -> (Config, Option<String>) {
@@ -53,6 +57,8 @@ fn config() -> (Config, Option<String>) {
         debug: false,
         update_check: true,
         expect: None,
+        spell: true,
+        spell_threshold: 0.85,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);
@@ -66,6 +72,11 @@ fn config() -> (Config, Option<String>) {
             "--debug" => c.debug = true,
             "--no-update-check" => c.update_check = false,
             "--expect" => c.expect = args.next(),
+            "--no-spell" => c.spell = false,
+            "--spell-threshold" => {
+                c.spell_threshold = args.next().and_then(|v| v.parse().ok()).unwrap_or(c.spell_threshold)
+            }
+            "--spelltest" => selftest = args.next().map(|t| format!("\u{2}{t}")),
             "--version" => {
                 println!("AntiPunto {}", update::VERSION);
                 std::process::exit(0);
@@ -82,6 +93,70 @@ pub fn load_model(c: &Config) -> Result<ov::Model, String> {
     let _ = std::fs::create_dir_all(&c.cache_dir);
     let devs: Vec<&str> = c.devices.iter().map(String::as_str).collect();
     ov::Model::load(&c.ov_dir, &c.model, &devs, &c.cache_dir)
+}
+
+/// Орфография: словари и ранжировщик рядом с моделью раскладки.
+pub fn load_speller(c: &Config) -> Result<spell::Speller, String> {
+    let dir = c.model.parent().map(PathBuf::from).unwrap_or_default();
+    let devs: Vec<&str> = c.devices.iter().map(String::as_str).collect();
+    let model = ov::Model::load_shaped(
+        &c.ov_dir,
+        &dir.join("spell.xml"),
+        &devs,
+        &c.cache_dir,
+        &[spell::K * spell::L],
+        spell::K,
+    )?;
+    let ru = spell::Dict::load(&dir.join("spell_ru.tsv"))?;
+    let en = spell::Dict::load(&dir.join("spell_en.tsv"))?;
+    let known = spell::Known::load(&dir.join("spell_known.bloom")).ok();
+    Ok(spell::Speller::new(ru, en, known, model, c.spell_threshold))
+}
+
+/// Орфография по словам фразы, как будто каждое слово только что набрано.
+fn spelltest(c: &Config, text: &str) -> Result<(), String> {
+    let t0 = std::time::Instant::now();
+    let mut sp = load_speller(c)?;
+    println!("загрузка {:?}", t0.elapsed());
+    let mut out = String::new();
+    let mut ctx = String::new();
+    for token in text.split(' ').filter(|w| !w.is_empty()) {
+        let chars: Vec<char> = token.chars().collect();
+        let Some((lead, trail, ru)) = engine::spell_core(&chars) else {
+            out += token;
+            out.push(' ');
+            ctx = out.clone();
+            continue;
+        };
+        let word: String = chars[lead..chars.len() - trail].iter().collect();
+        let t = std::time::Instant::now();
+        let fix = sp.suggest(&format!("{ctx}{}", String::from_iter(&chars[..lead])), &word, ru)?;
+        let shown = match &fix {
+            Some((w, p)) if *w == word => {
+                println!("  «{word}» оставить {p:.2}");
+                word
+            }
+            Some((w, p)) if *p >= sp.threshold => {
+                println!("  «{word}» → «{w}» {p:.2} ({:?})", t.elapsed());
+                w.clone()
+            }
+            Some((w, p)) => {
+                println!("  «{word}» → «{w}»? {p:.2} — ниже порога");
+                word
+            }
+            None => word,
+        };
+        out.extend(&chars[..lead]);
+        out += &shown;
+        out.extend(&chars[chars.len() - trail..]);
+        out.push(' ');
+        ctx = out.clone();
+    }
+    println!("итог: {out}");
+    match &c.expect {
+        Some(e) if e.trim_end() != out.trim_end() => Err(format!("ожидалось: {e}")),
+        _ => Ok(()),
+    }
 }
 
 /// Набор текста целиком в английской раскладке, как будто забыли переключить.
@@ -160,6 +235,13 @@ fn main() {
         }
         return;
     }
+    if let Some(text) = st.as_deref().and_then(|t| t.strip_prefix('\u{2}')) {
+        if let Err(e) = spelltest(&cfg, text) {
+            eprintln!("ошибка: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Some(text) = st {
         if let Err(e) = selftest(&cfg, &text) {
             eprintln!("ошибка: {e}");
@@ -173,6 +255,11 @@ fn main() {
         let _mutex = CreateMutexW(None, false, w!("AntiPunto_single"));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return;
+        }
+        settings::load();
+        if !cfg.spell {
+            // --no-spell: только на этот запуск
+            settings::SPELL.store(false, std::sync::atomic::Ordering::SeqCst);
         }
         tray::set_status("загрузка модели…".into());
         let (tx, rx) = channel();

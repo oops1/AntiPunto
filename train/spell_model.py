@@ -1,5 +1,7 @@
 """Ранжировщик кандидатов: оценка каждой строки «контекст | набранное | кандидат»."""
 
+from pathlib import Path
+
 import torch
 from torch import nn
 
@@ -23,3 +25,16 @@ class SpellNet(nn.Module):
         keep = (x != PAD).unsqueeze(-1).float()
         pooled = (h * keep).sum(1) / keep.sum(1).clamp(min=1)
         return self.head(pooled).squeeze(-1)
+
+
+def save_net(net: SpellNet, cfg: dict, path: Path) -> None:
+    torch.save({"cfg": cfg, "state": net.state_dict()}, path)
+
+
+def load_net(path: Path) -> SpellNet:
+    """Чекпойнт с размером модели; старые (v1–v4) — голые веса маленькой модели."""
+    ck = torch.load(path, map_location="cpu")
+    cfg, state = (ck["cfg"], ck["state"]) if "cfg" in ck else ({}, ck)
+    net = SpellNet(**cfg).eval()
+    net.load_state_dict(state)
+    return net

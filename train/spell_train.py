@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 import paths
 from spell_common import K
-from spell_model import SpellNet
+from spell_model import SpellNet, save_net
 
 DATA = paths.ROOT / "spell"
 
@@ -32,7 +32,7 @@ def logits(model, x, m):
 
 
 @torch.no_grad()
-def evaluate(model, data, bs=2048):
+def evaluate(model, data, bs=256):
     model.eval()
     x, m, y = data
     loss = acc = 0.0
@@ -42,6 +42,8 @@ def evaluate(model, data, bs=2048):
         loss += F.cross_entropy(z, y[i : i + bs], reduction="sum").item()
         acc += (z.argmax(1) == y[i : i + bs]).sum().item()
     model.train()
+    # иначе пик проверки держится, и Windows выносит видеопамять в ОЗУ
+    torch.cuda.empty_cache()
     return loss / len(x), acc / len(x)
 
 
@@ -52,7 +54,11 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--deadline", required=True, help="ЧЧ:ММ — остановиться не позже")
     ap.add_argument("--out", type=Path, default=DATA / "spell.pt")
+    ap.add_argument("--d", type=int, default=128)
+    ap.add_argument("--layers", type=int, default=3)
+    ap.add_argument("--heads", type=int, default=4)
     a = ap.parse_args()
+    cfg = {"d": a.d, "layers": a.layers, "heads": a.heads, "ff": 3 * a.d}
     h, mnt = map(int, a.deadline.split(":"))
     stop = dt.datetime.now().replace(hour=h, minute=mnt, second=0, microsecond=0)
     if stop < dt.datetime.now():
@@ -61,7 +67,7 @@ if __name__ == "__main__":
     dev = torch.device("cuda")
     torch.manual_seed(0)
     tr, va = load("train", dev), load("valid", dev)
-    model = SpellNet().to(dev)
+    model = SpellNet(**cfg).to(dev)
     print(f"параметров {sum(p.numel() for p in model.parameters()):,}, групп {len(tr[0]):,}, стоп {stop:%H:%M}", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.98), weight_decay=0.01)
     sched = torch.optim.lr_scheduler.LambdaLR(
@@ -84,7 +90,7 @@ if __name__ == "__main__":
             print(f"шаг {step}: train {loss.item():.4f} valid {vl:.4f} точность {vacc:.4f} {time.time() - t0:.0f} с", flush=True)
             if vl < best:
                 best = vl
-                torch.save(model.state_dict(), a.out)
+                save_net(model, cfg, a.out)
         if last:
             print("дедлайн: остановка", flush=True)
             break

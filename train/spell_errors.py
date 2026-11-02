@@ -10,7 +10,7 @@ import torch
 
 import paths
 from spell_common import CHAR_ID, CTX, K, WLEN
-from spell_model import SpellNet
+from spell_model import load_net
 
 DATA = paths.ROOT / "spell"
 ID_CHAR = {v: k for k, v in CHAR_ID.items()}
@@ -24,8 +24,7 @@ if __name__ == "__main__":
     t = float(sys.argv[1]) if len(sys.argv) > 1 else 0.80
     d = np.load(DATA / "test.npz")
     x, m, y = d["x"][:6000], d["m"][:6000], d["y"][:6000]
-    net = SpellNet().eval()
-    net.load_state_dict(torch.load(DATA / "spell.pt", map_location="cpu"))
+    net = load_net(DATA / "spell.pt")
     with torch.no_grad():
         s = net(torch.from_numpy(x).long().reshape(-1, x.shape[-1])).reshape(len(x), K)
         s = s.masked_fill(torch.from_numpy(m) == 0, -1e4)

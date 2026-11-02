@@ -17,7 +17,7 @@ import paths
 from spell_common import K, L, Dictionary, osa, row
 from spell_keep import Bloom
 from spell_known import MODELS
-from spell_model import SpellNet
+from spell_model import load_net
 
 DATA = paths.ROOT / "spell"
 WORD = re.compile(r"[А-Яа-яЁё]+|[A-Za-z]+")
@@ -49,8 +49,7 @@ if __name__ == "__main__":
     root = Path(sys.argv[1])
     known = Bloom(MODELS / "spell_known.bloom")
     dicts = {"ru": Dictionary("ru"), "en": Dictionary("en")}
-    net = SpellNet().eval()
-    net.load_state_dict(torch.load(DATA / (sys.argv[2] if len(sys.argv) > 2 else "spell.pt"), map_location="cpu"))
+    net = load_net(DATA / (sys.argv[2] if len(sys.argv) > 2 else "spell.pt"))
     msgs = list(user_texts(root))
     words = Counter()
     ctxs = defaultdict(list)

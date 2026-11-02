@@ -1,4 +1,4 @@
-"""Орфография: словарь, кандидаты (SymSpell, 1 удаление с каждой стороны), опечатки, кодирование."""
+"""Орфография: словарь, кандидаты (до 2 правок: варианты в 1 правку + SymSpell), опечатки, кодирование."""
 
 import math
 import random
@@ -56,6 +56,7 @@ class Dictionary:
     def __init__(self, lang: str, top: int | None = None):
         rows = [l.split("\t") for l in (paths.ROOT / "spell" / f"{lang}.tsv").read_text(encoding="utf-8").splitlines()]
         rows = rows[:top] if top else rows
+        self.alpha = ALPHABET[lang]
         self.words = [w for w, _ in rows]
         self.freq = {w: int(c) for w, c in rows}
         self.deletes: dict[str, list[int]] = {}
@@ -63,18 +64,21 @@ class Dictionary:
             for d in deletes1(w):
                 self.deletes.setdefault(d, []).append(i)
 
-    def candidates(self, typed: str) -> list[str]:
-        """Словарные слова в пределах ~2 правок, лучшие первыми."""
-        found = set()
-        d1 = deletes1(typed)
-        for k in {typed} | d1:
+    def near(self, v: str, found: set[str]) -> None:
+        """Словарные слова в одной правке от v (удаление с каждой стороны)."""
+        for k in (v, *deletes1(v)):
             if k in self.freq:
                 found.add(k)
             for i in self.deletes.get(k, ()):
                 found.add(self.words[i])
-        # две лишние буквы в набранном («черерез» → «через»)
-        for k in d1:
-            found.update(x for x in deletes1(k) if x in self.freq)
+
+    def candidates(self, typed: str) -> list[str]:
+        """Словарные слова в пределах 2 правок, лучшие первыми."""
+        found: set[str] = set()
+        self.near(typed, found)
+        # вторая правка: от каждого варианта набранного в одну правку
+        for v in edits1(typed, self.alpha):
+            self.near(v, found)
         found.discard(typed)
         scored = [(osa(typed, w), -self.freq[w], w) for w in found]
         return [w for d, _, w in sorted(scored) if d <= 2][: K - 1]
@@ -82,6 +86,19 @@ class Dictionary:
 
 def deletes1(w: str) -> set[str]:
     return {w[:i] + w[i + 1 :] for i in range(len(w))}
+
+
+def edits1(w: str, alpha: str) -> set[str]:
+    """Все строки в одной правке: удаление, перестановка, замена, вставка."""
+    out = deletes1(w)
+    out.update(w[:i] + w[i + 1] + w[i] + w[i + 2 :] for i in range(len(w) - 1))
+    for i in range(len(w) + 1):
+        for c in alpha:
+            out.add(w[:i] + c + w[i:])
+            if i < len(w):
+                out.add(w[:i] + c + w[i + 1 :])
+    out.discard(w)
+    return out
 
 
 def osa(a: str, b: str) -> int:
@@ -123,25 +140,39 @@ VOWELS = {"о": "а", "а": "о", "е": "и", "и": "е", "я": "е", "э": "е"
 
 
 def corrupt(w: str, lang: str, rng: random.Random) -> str:
+    """Правдоподобная опечатка; в длинных словах бывает и вторая."""
+    out = corrupt1(w, lang, rng)
+    if len(w) >= 6 and rng.random() < 0.3:
+        out = corrupt1(out, lang, rng)
+    return out
+
+
+def corrupt1(w: str, lang: str, rng: random.Random) -> str:
     """Одна правдоподобная опечатка."""
     if len(w) < 3:
         return w
     i = rng.randrange(len(w))
     r = rng.random()
-    if r < 0.35 and NEAR.get(w[i]):
+    if r < 0.30 and NEAR.get(w[i]):
         return w[:i] + rng.choice(NEAR[w[i]]) + w[i + 1 :]
-    if r < 0.55:
+    if r < 0.48:
         return w[:i] + w[i + 1 :]
-    if r < 0.70:
+    if r < 0.62:
         ins = rng.choice(NEAR.get(w[i]) or w[i]) if rng.random() < 0.6 else w[i]
         return w[:i] + ins + w[i:]
-    if r < 0.85 and i < len(w) - 1:
+    if r < 0.76 and i < len(w) - 1:
         return w[:i] + w[i + 1] + w[i] + w[i + 2 :]
-    if lang == "ru" and r < 0.95:
+    if lang == "ru" and r < 0.86:
         vs = [j for j, c in enumerate(w) if c in VOWELS]
         if vs:
             j = rng.choice(vs)
             return w[:j] + VOWELS[w[j]] + w[j + 1 :]
+    if lang == "ru" and r < 0.93:
+        # двойная буква одной («сесия»), пропущенный ь/ъ («видеш»)
+        js = [j for j in range(len(w) - 1) if w[j] == w[j + 1]] + [j for j, c in enumerate(w) if c in "ьъ"]
+        if js:
+            j = rng.choice(js)
+            return w[:j] + w[j + 1 :]
     if lang == "ru" and w.endswith("ться"):
         return w[:-4] + "тся"
     if lang == "ru" and w.endswith("тся"):

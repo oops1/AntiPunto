@@ -21,7 +21,7 @@ def text(row, a, n):
 
 
 if __name__ == "__main__":
-    t = float(sys.argv[1]) if len(sys.argv) > 1 else 0.85
+    t = float(sys.argv[1]) if len(sys.argv) > 1 else 0.80
     d = np.load(DATA / "test.npz")
     x, m, y = d["x"][:6000], d["m"][:6000], d["y"][:6000]
     net = SpellNet().eval()

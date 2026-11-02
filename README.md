@@ -1,3 +1,5 @@
+![AntiPunto: раскладка по смыслу фразы и исправление опечаток для Windows](docs/social-preview.png)
+
 # AntiPunto
 
 [![CI](https://github.com/oops1/AntiPunto/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/oops1/AntiPunto/actions/workflows/ci.yml)

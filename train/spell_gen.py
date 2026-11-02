@@ -19,7 +19,7 @@ from spell_known import MODELS
 
 WORDS = {"ru": re.compile(r"[а-яё]+"), "en": re.compile(r"[a-z]+")}
 P_KEEP = 0.35  # доля групп «правильное редкое слово — не трогать»
-P_SPLIT = 0.12  # доля опечаток «пропущен пробел»: «вчем» → «в чем»
+P_SPLIT = 0.2  # доля опечаток «пропущен пробел»: «вчем» → «в чем»
 
 _dicts: dict[str, Dictionary] = {}
 _keep: dict[str, list[str]] = {}

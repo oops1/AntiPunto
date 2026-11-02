@@ -111,7 +111,14 @@ pub fn load_speller(c: &Config) -> Result<spell::Speller, String> {
     let ru = spell::Dict::load(&dir.join("spell_ru.tsv"), true)?;
     let en = spell::Dict::load(&dir.join("spell_en.tsv"), false)?;
     let known = spell::Known::load(&dir.join("spell_known.bloom")).ok();
-    Ok(spell::Speller::new(ru, en, known, model, c.spell_threshold))
+    let split = dir.join("spell_split.xml");
+    let split = split
+        .exists()
+        .then(|| {
+            ov::Model::load_shaped(&c.ov_dir, &split, &devs, &c.cache_dir, &[spell::K * spell::L], spell::K)
+        })
+        .transpose()?;
+    Ok(spell::Speller::new(ru, en, known, model, split, c.spell_threshold))
 }
 
 /// Орфография по словам фразы, как будто каждое слово только что набрано.

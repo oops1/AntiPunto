@@ -15,7 +15,7 @@ import torch.nn.functional as F
 
 import paths
 from spell_common import K
-from spell_model import SpellNet, save_net
+from spell_model import SpellNet, load_net, save_net
 
 DATA = paths.ROOT / "spell"
 
@@ -57,8 +57,11 @@ if __name__ == "__main__":
     ap.add_argument("--d", type=int, default=128)
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=4)
+    ap.add_argument("--init", type=Path, help="дообучить с чекпойнта")
     a = ap.parse_args()
     cfg = {"d": a.d, "layers": a.layers, "heads": a.heads, "ff": 3 * a.d}
+    if a.init:
+        cfg = torch.load(a.init, map_location="cpu")["cfg"]
     h, mnt = map(int, a.deadline.split(":"))
     stop = dt.datetime.now().replace(hour=h, minute=mnt, second=0, microsecond=0)
     if stop < dt.datetime.now():
@@ -67,7 +70,7 @@ if __name__ == "__main__":
     dev = torch.device("cuda")
     torch.manual_seed(0)
     tr, va = load("train", dev), load("valid", dev)
-    model = SpellNet(**cfg).to(dev)
+    model = (load_net(a.init).train() if a.init else SpellNet(**cfg)).to(dev)
     print(f"параметров {sum(p.numel() for p in model.parameters()):,}, групп {len(tr[0]):,}, стоп {stop:%H:%M}", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.98), weight_decay=0.01)
     sched = torch.optim.lr_scheduler.LambdaLR(

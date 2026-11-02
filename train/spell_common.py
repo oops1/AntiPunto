@@ -207,6 +207,8 @@ def corrupt1(w: str, lang: str, rng: random.Random) -> str:
         return w[:i] + w[i + 1 :]
     if r < 0.62:
         ins = rng.choice(NEAR.get(w[i]) or w[i]) if rng.random() < 0.6 else w[i]
+        if i == 0 and ins in SINGLE[lang]:
+            i = 1  # «в»+«чем» — это пропущенный пробел
         return w[:i] + ins + w[i:]
     if r < 0.76 and i < len(w) - 1:
         return w[:i] + w[i + 1] + w[i] + w[i + 2 :]

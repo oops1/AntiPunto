@@ -9,6 +9,8 @@ const KEY: PCWSTR = w!("Software\\AntiPunto");
 
 /// Исправлять опечатки (раскладка — отдельно, «Включено»).
 pub static SPELL: AtomicBool = AtomicBool::new(true);
+/// Показывать варианты у курсора, когда модель сомневается.
+pub static SUGGEST: AtomicBool = AtomicBool::new(true);
 
 fn get(name: PCWSTR) -> Option<u32> {
     let mut v = 0u32;
@@ -28,11 +30,17 @@ fn put(name: PCWSTR, v: u32) {
 
 pub fn load() {
     SPELL.store(get(w!("Spell")) != Some(0), SeqCst);
+    SUGGEST.store(get(w!("Suggest")) != Some(0), SeqCst);
 }
 
 pub fn set_spell(on: bool) {
     SPELL.store(on, SeqCst);
     put(w!("Spell"), on as u32);
+}
+
+pub fn set_suggest(on: bool) {
+    SUGGEST.store(on, SeqCst);
+    put(w!("Suggest"), on as u32);
 }
 
 #[cfg(test)]

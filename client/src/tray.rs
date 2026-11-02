@@ -17,7 +17,7 @@ use windows::core::{HSTRING, PCWSTR, w};
 use crate::hook::{ENABLED, Event, SENDER, foreground_layout};
 use crate::keymap::{EN, RU};
 use crate::worker::LAST_APP;
-use crate::{autostart, lists, settings, update};
+use crate::{autostart, lists, popup, settings, update};
 
 pub const WM_TRAY: u32 = WM_APP + 1;
 pub const WM_FENCE: u32 = WM_APP + 2;
@@ -32,6 +32,7 @@ const ID_LIST_IGNORE: usize = 7;
 const ID_LIST_FORCE: usize = 8;
 const ID_EXIT: usize = 9;
 const ID_SPELL: usize = 10;
+const ID_SUGGEST: usize = 11;
 
 pub static READY: AtomicBool = AtomicBool::new(false);
 pub static STATUS: Mutex<String> = Mutex::new(String::new());
@@ -193,6 +194,9 @@ fn menu(hwnd: HWND) {
         let _ = AppendMenuW(m, MF_STRING | on, ID_TOGGLE, w!("Включено"));
         let spell = if settings::SPELL.load(SeqCst) { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(m, MF_STRING | spell, ID_SPELL, w!("Исправлять опечатки"));
+        let sug = if settings::SUGGEST.load(SeqCst) { MF_CHECKED } else { MF_UNCHECKED };
+        let grey = if settings::SPELL.load(SeqCst) { MF_ENABLED } else { MF_GRAYED };
+        let _ = AppendMenuW(m, MF_STRING | sug | grey, ID_SUGGEST, w!("Предлагать варианты слова"));
         let status: Vec<u16> = STATUS.lock().unwrap().encode_utf16().chain([0]).collect();
         let _ = AppendMenuW(m, MF_STRING | MF_GRAYED, 0, PCWSTR(status.as_ptr()));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
@@ -281,6 +285,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     ID_UPDATE => start_install(hwnd),
                     ID_AUTOSTART => autostart::set(!autostart::enabled()),
                     ID_SPELL => settings::set_spell(!settings::SPELL.load(SeqCst)),
+                    ID_SUGGEST => settings::set_suggest(!settings::SUGGEST.load(SeqCst)),
                     ID_SKIP_APP => {
                         let app = LAST_APP.lock().unwrap().clone();
                         match lists::add_program(&app) {
@@ -355,6 +360,7 @@ pub fn run(auto_update_check: bool) {
             return;
         };
         MAIN_HWND.store(hwnd.0 as isize, SeqCst);
+        popup::create(hinst.into());
         TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
 
         let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem());

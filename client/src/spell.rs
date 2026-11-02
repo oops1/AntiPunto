@@ -295,6 +295,11 @@ impl Speller {
 
     /// Выбор модели и его вероятность (выбор == typed — оставить); None — не спрашивали.
     pub fn suggest(&mut self, ctx: &str, typed: &str, ru: bool) -> Result<Option<(String, f32)>, String> {
+        Ok(self.rank(ctx, typed, ru)?.map(|mut v| v.swap_remove(0)))
+    }
+
+    /// Все варианты с вероятностями, лучший первым; typed — «оставить».
+    pub fn rank(&mut self, ctx: &str, typed: &str, ru: bool) -> Result<Option<Vec<(String, f32)>>, String> {
         let d = self.dict(ru);
         if d.contains(typed) || self.known.as_ref().is_some_and(|k| k.contains(typed)) {
             return Ok(None);
@@ -318,9 +323,10 @@ impl Speller {
         let max = z[..n].iter().cloned().fold(f32::MIN, f32::max);
         let e: Vec<f32> = z[..n].iter().map(|v| (v - max).exp()).collect();
         let sum: f32 = e.iter().sum();
-        let (best, p) =
-            e.iter().enumerate().map(|(i, v)| (i, v / sum)).fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
-        Ok(Some((opts[best].to_string(), p)))
+        let mut v: Vec<(String, f32)> = opts.iter().zip(&e).map(|(o, x)| (o.to_string(), x / sum)).collect();
+        // устойчивая: при равенстве выигрывает «оставить», как раньше
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Ok(Some(v))
     }
 }
 

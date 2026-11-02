@@ -20,6 +20,7 @@ use crate::hook::{CORRECTING, Event, HAS_WORD, Key, UNDO_READY, is_modifier};
 use crate::keymap::{KEYMAP, OTHER, SPACE};
 use crate::lists::{self, Lists};
 use crate::ov::Model;
+use crate::popup;
 use crate::spell::Speller;
 use crate::stats::{Saver, Stats};
 use crate::tray::{READY, fence, set_status};
@@ -44,6 +45,25 @@ impl Mods {
     fn command(&self) -> bool {
         self.ctrl_l || self.ctrl_r || self.alt_l || self.alt_r || self.win_l || self.win_r
     }
+}
+
+/// Варианты ниже этой уверенности не показываем.
+const OFFER_MIN_P: f32 = 0.05;
+
+/// Результат орфографии для последнего слова: границы в буфере и варианты.
+struct Checked {
+    a: usize,
+    b: usize,
+    word: String,
+    ranked: Vec<(String, f32)>,
+}
+
+/// Варианты для слова a..b в буфере; text — что там сейчас на экране.
+struct Offer {
+    a: usize,
+    b: usize,
+    text: String,
+    items: Vec<String>,
 }
 
 /// Последняя автоправка: Pause возвращает как было.
@@ -73,6 +93,8 @@ struct Worker {
     rctrl_tap: Option<Instant>,
     speller: Option<Speller>,
     speller_failed: bool,
+    /// Сомнительные слова фразы: окно у курсора держится до конца фразы.
+    offers: Vec<Offer>,
 }
 
 /// Программа, где печатали последней: для пункта меню «не исправлять здесь».
@@ -156,6 +178,11 @@ impl Worker {
                 self.buf.clear();
                 self.undo = None;
                 self.rctrl_tap = None;
+                self.dismiss();
+                return;
+            }
+            Event::Pick(i) => {
+                self.pick(i);
                 return;
             }
             Event::Key(k) => k,
@@ -171,6 +198,10 @@ impl Worker {
         }
         self.rctrl_clean = false;
         self.rctrl_tap = None;
+        if let Some(i) = k.pick {
+            self.pick(i);
+            return;
+        }
         self.lists.refresh();
         if k.hwnd != self.hwnd {
             self.hwnd = k.hwnd;
@@ -218,11 +249,12 @@ impl Worker {
             VK_SPACE => {
                 self.buf.push(Ch::new(SPACE, lay, ' '));
                 if self.buf.word_just_ended() {
-                    self.correct(rx, pending);
+                    self.correct(rx, pending, true);
                 }
             }
             VK_RETURN | VK_TAB if k.boundary => {
-                self.correct(rx, pending);
+                // после Enter сообщение уже ушло: варианты не к месту
+                self.correct(rx, pending, false);
                 input::tap(k.vk, k.scan, k.ext);
                 self.buf.clear();
             }
@@ -255,8 +287,8 @@ impl Worker {
         }
     }
 
-    /// Орфография последнего слова с учётом правки раскладки: (a, b, новое слово, уверенность).
-    fn spell_check(&mut self, plan: Option<&Plan>) -> Option<(usize, usize, String, f32)> {
+    /// Орфография последнего слова с учётом правки раскладки: все варианты модели.
+    fn spell_check(&mut self, plan: Option<&Plan>) -> Option<Checked> {
         if !settings::SPELL.load(SeqCst) {
             self.speller = None; // выключили — освободить память
             return None;
@@ -271,19 +303,138 @@ impl Worker {
         if self.lists.ignore.contains(&word) || self.lists.force.contains(&word) {
             return None;
         }
-        match sp.suggest(&ctx, &word, ru) {
-            Ok(Some((cand, p))) if cand != word && p >= sp.threshold => Some((a, b, cand, p)),
-            Ok(Some((cand, p))) => {
-                if self.cfg.debug {
-                    if cand == word {
-                        println!("  орфография: «{word}» оставить {p:.2}");
-                    } else {
-                        println!("  орфография: «{word}» → «{cand}»? {p:.2} — ниже порога");
-                    }
-                }
-                None
+        let ranked = sp.rank(&ctx, &word, ru).ok()??;
+        if self.cfg.debug {
+            let top: Vec<String> = ranked.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
+            println!("  орфография: «{word}» {}", top.join(" "));
+        }
+        Some(Checked { a, b, word, ranked })
+    }
+
+    /// Варианты для окна у курсора; fixed — лучший уже подставлен.
+    fn offer_items(c: &Checked, fixed: bool) -> Vec<String> {
+        let mut items: Vec<String> = c
+            .ranked
+            .iter()
+            .filter(|(w, p)| *w != c.word && *p >= OFFER_MIN_P)
+            .skip(fixed as usize)
+            .map(|(w, _)| w.clone())
+            .take(popup::PER_ROW - fixed as usize)
+            .collect();
+        if fixed && !items.is_empty() {
+            items.push(c.word.clone());
+        }
+        items
+    }
+
+    fn render(&self, a: usize, b: usize) -> String {
+        self.buf.chars[a..b].iter().map(Ch::render).collect()
+    }
+
+    /// Добавить строку вариантов для слова a..b и обновить окно.
+    fn add_offer(&mut self, a: usize, b: usize, items: Vec<String>) {
+        if items.is_empty() || !settings::SUGGEST.load(SeqCst) || b > self.buf.chars.len() {
+            return;
+        }
+        let text = self.render(a, b);
+        if self.cfg.debug {
+            println!("  варианты для «{text}»: {}", items.join(" · "));
+        }
+        self.offers.push(Offer { a, b, text, items });
+        if self.offers.len() > popup::ROWS {
+            self.offers.remove(0);
+        }
+        self.show_offers();
+    }
+
+    /// Окно по текущим строкам у курсора; без курсора — не показываем.
+    fn show_offers(&mut self) {
+        if self.offers.is_empty() {
+            popup::hide();
+            return;
+        }
+        let Some(caret) = self.focus.caret() else {
+            if self.cfg.debug {
+                println!("  варианты: курсор не найден");
             }
-            _ => None,
+            popup::hide();
+            return;
+        };
+        if self.cfg.debug {
+            println!("  окно вариантов: курсор ({})", caret.how);
+        }
+        let rows = self.offers.iter().map(|o| popup::Row { word: o.text.clone(), items: o.items.clone() }).collect();
+        popup::show(rows, caret.rect);
+    }
+
+    /// Убрать строки слов, которых в буфере больше нет (стёрли, Enter, клик); true — что-то убрали.
+    fn sync_offers(&mut self) -> bool {
+        let n = self.offers.len();
+        let chars = &self.buf.chars;
+        self.offers
+            .retain(|o| o.b <= chars.len() && chars[o.a..o.b].iter().map(Ch::render).collect::<String>() == o.text);
+        self.offers.len() != n
+    }
+
+    /// Выбран вариант i (сквозной номер): заменить слово, хвост напечатать заново.
+    fn pick(&mut self, i: usize) {
+        let mut k = i;
+        let Some(row) = self.offers.iter().position(|o| {
+            let hit = k < o.items.len();
+            if !hit {
+                k -= o.items.len();
+            }
+            hit
+        }) else {
+            return;
+        };
+        let o = self.offers.remove(row);
+        let word = o.items[k].clone();
+        if o.b > self.buf.chars.len() || self.render(o.a, o.b) != o.text || self.focus.is_password() {
+            self.show_offers();
+            return;
+        }
+        CORRECTING.store(true, SeqCst);
+        fence();
+        // с зажатым Ctrl Backspace стёр бы слово целиком
+        let t = Instant::now();
+        while unsafe { GetAsyncKeyState(VK_CONTROL.0 as i32) } as u16 & 0x8000 != 0 {
+            if t.elapsed() > Duration::from_secs(3) {
+                CORRECTING.store(false, SeqCst);
+                self.offers.insert(row, o);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let before = self.buf.clone();
+        if self.buf.replace_word(o.a, o.b, &word) {
+            let old: String = before.chars[o.a..].iter().map(Ch::render).collect();
+            let text: String = self.buf.chars[o.a..].iter().map(Ch::render).collect();
+            if input::replace(before.chars.len() - o.a, &text) {
+                self.stats.picks += 1;
+                if self.cfg.debug {
+                    println!("вариант {}: «{}» → «{word}»", i + 1, o.text);
+                }
+                let delta = self.buf.chars.len() as isize - before.chars.len() as isize;
+                for x in self.offers.iter_mut().filter(|x| x.a > o.a) {
+                    x.a = (x.a as isize + delta) as usize;
+                    x.b = (x.b as isize + delta) as usize;
+                }
+                self.undo = Some(Undo { before: before.clone(), text, old, old_lay: before.chars[o.a].lay });
+                UNDO_READY.store(true, SeqCst);
+            } else {
+                self.buf.clear();
+            }
+        }
+        CORRECTING.store(false, SeqCst);
+        self.sync_offers();
+        self.show_offers();
+    }
+
+    fn dismiss(&mut self) {
+        if !self.offers.is_empty() {
+            self.offers.clear();
+            popup::hide();
         }
     }
 
@@ -339,11 +490,11 @@ impl Worker {
         input::type_text(&ch.render().to_string());
         self.buf.push(ch);
         if ch.tok == SPACE && self.buf.word_just_ended() {
-            self.correct(rx, pending);
+            self.correct(rx, pending, true);
         }
     }
 
-    fn correct(&mut self, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
+    fn correct(&mut self, rx: &Receiver<Event>, pending: &mut VecDeque<Event>, offer_ok: bool) {
         // пароль: не смотреть и не трогать
         if self.focus.is_password() {
             self.buf.clear();
@@ -377,10 +528,24 @@ impl Worker {
                 return;
             }
         };
-        let spell = self.spell_check(plan.as_ref());
+        let checked = self.spell_check(plan.as_ref());
+        let thr = self.speller.as_ref().map_or(f32::INFINITY, |s| s.threshold);
+        let spell = checked.as_ref().and_then(|c| {
+            let (w, p) = &c.ranked[0];
+            (*w != c.word && *p >= thr).then(|| (c.a, c.b, w.clone(), *p))
+        });
+        // слово после автоправки могло стать длиннее
+        let offer = checked.filter(|_| offer_ok).map(|c| {
+            let b = spell.as_ref().map_or(c.b, |s| c.a + s.2.chars().count());
+            (c.a, b, Self::offer_items(&c, spell.is_some()))
+        });
         if plan.is_none() && spell.is_none() {
+            if let Some((a, b, items)) = offer {
+                self.add_offer(a, b, items);
+            }
             return;
         }
+        let mut done = false;
         CORRECTING.store(true, SeqCst);
         fence();
         // всё, что прошло до флага, уже на экране
@@ -447,6 +612,7 @@ impl Worker {
                     // Backspace отменяет, только если после правки ничего не набрано
                     if !typed_more {
                         UNDO_READY.store(true, SeqCst);
+                        done = true;
                     }
                     if let Some(lay) = switch {
                         input::switch_layout(lay);
@@ -456,6 +622,12 @@ impl Worker {
             }
         }
         CORRECTING.store(false, SeqCst);
+        if done
+            && pending.is_empty()
+            && let Some((a, b, items)) = offer
+        {
+            self.add_offer(a, b, items);
+        }
         for ev in after.into_iter().rev() {
             pending.push_front(ev);
         }
@@ -501,6 +673,7 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         rctrl_tap: None,
         speller: None,
         speller_failed: false,
+        offers: Vec::new(),
     };
     w.ensure_speller();
     let mut pending = VecDeque::new();
@@ -513,6 +686,9 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
             },
         };
         w.handle(ev, &rx, &mut pending);
+        if w.sync_offers() {
+            w.show_offers();
+        }
         HAS_WORD.store(w.buf.has_word() && !w.excluded, SeqCst);
         saver.tick(&w.stats);
     }

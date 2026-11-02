@@ -8,6 +8,7 @@ mod input;
 mod keymap;
 mod lists;
 mod ov;
+mod popup;
 mod settings;
 mod spell;
 mod stats;
@@ -130,7 +131,12 @@ fn spelltest(c: &Config, text: &str) -> Result<(), String> {
         };
         let word: String = chars[lead..chars.len() - trail].iter().collect();
         let t = std::time::Instant::now();
-        let fix = sp.suggest(&format!("{ctx}{}", String::from_iter(&chars[..lead])), &word, ru)?;
+        let ranked = sp.rank(&format!("{ctx}{}", String::from_iter(&chars[..lead])), &word, ru)?;
+        let fix = ranked.as_ref().map(|v| v[0].clone());
+        if let Some(v) = &ranked {
+            let alt: Vec<String> = v.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
+            println!("  варианты: {}", alt.join(" "));
+        }
         let shown = match &fix {
             Some((w, p)) if *w == word => {
                 println!("  «{word}» оставить {p:.2}");

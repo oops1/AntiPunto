@@ -11,10 +11,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, HC_ACTION,
-    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_XBUTTONDOWN,
+    KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_UP, MSLLHOOKSTRUCT, WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN,
+    WM_XBUTTONDOWN,
 };
 
 use crate::keymap::{EN, RU};
+use crate::popup;
 
 /// Метка наших синтетических нажатий в dwExtraInfo.
 pub const MARKER: usize = 0x5345_4B59;
@@ -40,6 +42,8 @@ pub struct Key {
     pub boundary: bool,
     /// Backspace проглочен как отмена автоправки.
     pub undo: bool,
+    /// Цифра при открытых вариантах: номер варианта.
+    pub pick: Option<usize>,
 }
 
 fn held(vk: VIRTUAL_KEY) -> bool {
@@ -49,6 +53,8 @@ fn held(vk: VIRTUAL_KEY) -> bool {
 pub enum Event {
     Key(Key),
     Mouse,
+    /// Клик по варианту в окне у курсора.
+    Pick(usize),
 }
 
 pub fn is_modifier(vk: u16) -> bool {
@@ -106,6 +112,19 @@ pub unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRES
                     && vk == VK_BACK.0
                     && !deferred
                     && ![VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN].into_iter().any(held);
+                // Ctrl+цифра при открытых вариантах; голые цифры — это текст
+                let digit = match vk {
+                    0x31..=0x39 => vk as usize - 0x31,
+                    0x61..=0x69 => vk as usize - 0x61,
+                    _ => usize::MAX,
+                };
+                let pick = (!up
+                    && !deferred
+                    && digit < popup::COUNT.load(SeqCst)
+                    && popup::VISIBLE.load(SeqCst)
+                    && held(VK_CONTROL)
+                    && ![VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN].into_iter().any(held))
+                .then_some(digit);
                 let (lay, hwnd) = foreground_layout();
                 if let Some(tx) = SENDER.get() {
                     let ev = Key {
@@ -118,8 +137,9 @@ pub unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRES
                         deferred,
                         boundary,
                         undo,
+                        pick,
                     };
-                    if tx.send(Event::Key(ev)).is_ok() && (deferred || boundary || undo) {
+                    if tx.send(Event::Key(ev)).is_ok() && (deferred || boundary || undo || pick.is_some()) {
                         return LRESULT(1);
                     }
                 }
@@ -133,7 +153,9 @@ pub unsafe extern "system" fn mouse_proc(code: i32, wp: WPARAM, lp: LPARAM) -> L
     unsafe {
         if code == HC_ACTION as i32 {
             let m = wp.0 as u32;
-            if [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN].contains(&m) {
+            let pt = (*(lp.0 as *const MSLLHOOKSTRUCT)).pt;
+            // клик по варианту — не сброс набранного
+            if [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN, WM_XBUTTONDOWN].contains(&m) && !popup::hit(pt) {
                 UNDO_READY.store(false, SeqCst);
                 if let Some(tx) = SENDER.get() {
                     let _ = tx.send(Event::Mouse);

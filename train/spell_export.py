@@ -12,7 +12,7 @@ import torch
 
 import paths
 from spell_common import K, L
-from spell_model import SpellNet
+from spell_model import load_net
 
 DATA = paths.ROOT / "spell"
 MODELS = Path(__file__).resolve().parent.parent / "models"
@@ -29,8 +29,7 @@ class Scores(torch.nn.Module):
 
 def main():
     torch.backends.mha.set_fastpath_enabled(False)
-    net = SpellNet().eval()
-    net.load_state_dict(torch.load(DATA / "spell.pt", map_location="cpu"))
+    net = load_net(DATA / "spell.pt")
     wrap = Scores(net).eval()
     ovm = ov.convert_model(wrap, example_input=torch.zeros(K, L, dtype=torch.int32), input=[([K, L], ov.Type.i32)])
     ov.save_model(ovm, DATA / "spell.xml", compress_to_fp16=True)

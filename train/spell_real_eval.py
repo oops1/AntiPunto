@@ -14,7 +14,7 @@ import paths
 from spell_common import K, L, Dictionary, osa, row
 from spell_keep import Bloom
 from spell_known import MODELS
-from spell_model import SpellNet
+from spell_model import load_net
 
 DATA = paths.ROOT / "spell"
 THRESHOLDS = (0.6, 0.7, 0.8, 0.85, 0.9)
@@ -66,8 +66,7 @@ if __name__ == "__main__":
     in_dict = sum(1 for w, t, *_ in typos if w in d.freq or w in known)
     lines.append(f"верный ответ среди кандидатов: {reach / len(typos):.1%}; опечатка считается известным словом: {in_dict}")
     for name in sys.argv[1:]:
-        net = SpellNet().eval()
-        net.load_state_dict(torch.load(DATA / f"{name}.pt", map_location="cpu"))
+        net = load_net(DATA / f"{name}.pt")
         res = [(c, choose(net, d, known, c[2], c[0])) for c in cases]
         lines.append(f"== {name}")
         for t in THRESHOLDS:

@@ -10,7 +10,7 @@ import torch
 
 import paths
 from spell_common import K
-from spell_model import SpellNet
+from spell_model import load_net
 
 DATA = paths.ROOT / "spell"
 
@@ -19,8 +19,7 @@ if __name__ == "__main__":
     ckpt = sys.argv[2] if len(sys.argv) > 2 else "spell"
     d = np.load(DATA / f"{split}.npz")
     x, m, y = torch.from_numpy(d["x"]).long(), torch.from_numpy(d["m"]), torch.from_numpy(d["y"]).long()
-    net = SpellNet().eval()
-    net.load_state_dict(torch.load(DATA / f"{ckpt}.pt", map_location="cpu"))
+    net = load_net(DATA / f"{ckpt}.pt")
     probs = []
     with torch.no_grad():
         for i in range(0, len(x), 256):

@@ -87,6 +87,10 @@ def load(split: str, lang: str) -> list[str]:
     out = []
     for name in (f"{lang}.{split}.txt", f"chat_{lang}.{split}.txt"):
         out += (paths.CORPUS / name).read_text(encoding="utf-8").splitlines()[:1_500_000]
+    # книги и примеры словаря (spell_lit.py): мало, но чистое согласование — повторяем
+    lit = paths.CORPUS / f"lit_{lang}.{split}.txt"
+    if lit.exists():
+        out += lit.read_text(encoding="utf-8").splitlines() * 3
     return out
 
 

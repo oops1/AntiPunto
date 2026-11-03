@@ -238,3 +238,22 @@
 перегенерировать INFN
 задизейблить INFN
 заэнейблить INFN
+хз NOUN
+кеп NOUN
+контрол NOUN стол
+померять INFN стрелять
+кароче ADVB
+короч ADVB
+пасибо ADVB
+спасиб ADVB
+терь ADVB
+токо ADVB
+щаз ADVB
+щяс ADVB
+нормас ADVB
+мдя ADVB
+харош ADVB
+ясн ADVB
+здаров ADVB
+покеда ADVB
+инэт NOUN

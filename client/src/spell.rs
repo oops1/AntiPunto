@@ -381,7 +381,14 @@ pub struct Speller {
 }
 
 impl Speller {
-    pub fn new(ru: Dict, en: Dict, known: Option<Known>, model: Model, split: Option<Model>, threshold: f32) -> Speller {
+    pub fn new(
+        ru: Dict,
+        en: Dict,
+        known: Option<Known>,
+        model: Model,
+        split: Option<Model>,
+        threshold: f32,
+    ) -> Speller {
         Speller { ru, en, known, model, split, threshold }
     }
 
@@ -416,7 +423,13 @@ impl Speller {
         Ok(if second[0].0.contains(' ') { Some(second) } else { first })
     }
 
-    fn score(d: &Dict, model: &mut Model, ctx: &str, typed: &str, cands: &[String]) -> Result<Vec<(String, f32)>, String> {
+    fn score(
+        d: &Dict,
+        model: &mut Model,
+        ctx: &str,
+        typed: &str,
+        cands: &[String],
+    ) -> Result<Vec<(String, f32)>, String> {
         let mut x = vec![PAD; K * L];
         let opts: Vec<&str> = std::iter::once(typed).chain(cands.iter().map(String::as_str)).collect();
         let t: Vec<char> = typed.chars().collect();

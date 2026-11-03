@@ -114,9 +114,7 @@ pub fn load_speller(c: &Config) -> Result<spell::Speller, String> {
     let split = dir.join("spell_split.xml");
     let split = split
         .exists()
-        .then(|| {
-            ov::Model::load_shaped(&c.ov_dir, &split, &devs, &c.cache_dir, &[spell::K * spell::L], spell::K)
-        })
+        .then(|| ov::Model::load_shaped(&c.ov_dir, &split, &devs, &c.cache_dir, &[spell::K * spell::L], spell::K))
         .transpose()?;
     Ok(spell::Speller::new(ru, en, known, model, split, c.spell_threshold))
 }

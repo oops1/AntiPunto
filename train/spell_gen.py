@@ -66,7 +66,8 @@ def group(lang: str, sent: str, rng: random.Random):
     spans = [s for s in all_spans if s[1] - s[0] >= 3]
     if not spans:
         return None
-    a, b = rng.choice(spans)
+    # длинные слова опечатываются чаще (реально половина опечаток в словах 9–12 букв)
+    a, b = rng.choices(spans, [e - s - 2 for s, e in spans])[0]
     ctx = sent[:a]
     word = sent[a:b].lower()
     if rng.random() < P_SPLIT * (1 - P_KEEP):

@@ -188,43 +188,65 @@ VOWELS = {"о": "а", "а": "о", "е": "и", "и": "е", "я": "е", "э": "е"
 
 
 def corrupt(w: str, lang: str, rng: random.Random) -> str:
-    """Правдоподобная опечатка; в длинных словах бывает и вторая."""
+    """Правдоподобная опечатка; в длинных словах бывает вторая и третья."""
     out = corrupt1(w, lang, rng)
-    if len(w) >= 6 and rng.random() < 0.3:
+    if len(w) >= 6 and rng.random() < 0.35:
         out = corrupt1(out, lang, rng)
+        if len(w) >= 9 and rng.random() < 0.15:
+            out = corrupt1(out, lang, rng)
     return out
 
 
+def _pos(w: str, rng: random.Random) -> int:
+    """Место правки; первая буква вдвое реже (реально 7 % против 13 %)."""
+    i = rng.randrange(len(w))
+    return rng.randrange(1, len(w)) if i == 0 and rng.random() < 0.5 else i
+
+
 def corrupt1(w: str, lang: str, rng: random.Random) -> str:
-    """Одна правдоподобная опечатка."""
+    """Одна опечатка; доли — по 977 реальным (error_stats.txt)."""
     if len(w) < 3:
         return w
-    i = rng.randrange(len(w))
+    ru = lang == "ru"
+    i = _pos(w, rng)
     r = rng.random()
-    if r < 0.30 and NEAR.get(w[i]):
+    if ru and r < 0.3 and w.endswith(("ться", "тся")):
+        return w[:-4] + "тся" if w.endswith("ться") else w[:-3] + "ться"
+    if r < 0.20 and NEAR.get(w[i]):
+        # задета соседняя клавиша вдобавок к нужной («продолджай»)
+        ins = rng.choice(NEAR[w[i]])
+        j = i + rng.randrange(2)
+        if j == 0 and ins in SINGLE[lang]:
+            j = 1  # «в»+«чем» — это пропущенный пробел
+        return w[:j] + ins + w[j:]
+    if r < 0.37:
+        j = min(i, len(w) - 2)
+        return w[:j] + w[j + 1] + w[j] + w[j + 2 :]
+    if r < 0.47 and NEAR.get(w[i]):
         return w[:i] + rng.choice(NEAR[w[i]]) + w[i + 1 :]
-    if r < 0.48:
-        return w[:i] + w[i + 1 :]
-    if r < 0.62:
-        ins = rng.choice(NEAR.get(w[i]) or w[i]) if rng.random() < 0.6 else w[i]
-        if i == 0 and ins in SINGLE[lang]:
-            i = 1  # «в»+«чем» — это пропущенный пробел
-        return w[:i] + ins + w[i:]
-    if r < 0.76 and i < len(w) - 1:
-        return w[:i] + w[i + 1] + w[i] + w[i + 2 :]
-    if lang == "ru" and r < 0.86:
+    if r < 0.52:
+        # лишняя буква из соседних («скачжи», «подоумать») или ь в конце («задачь»)
+        if ru and rng.random() < 0.2:
+            return w + "ь"
+        near = [c for c in w[max(0, i - 2) : i + 3] if c != w[i] and (i == 0 or c != w[i - 1])]
+        return w[:i] + rng.choice(near or ALPHABET[lang]) + w[i:]
+    if r < 0.55:
+        return w[:i] + w[i] + w[i:]
+    if r < 0.59 and ru:
         vs = [j for j, c in enumerate(w) if c in VOWELS]
         if vs:
             j = rng.choice(vs)
             return w[:j] + VOWELS[w[j]] + w[j + 1 :]
-    if lang == "ru" and r < 0.93:
-        # двойная буква одной («сесия»), пропущенный ь/ъ («видеш»)
-        js = [j for j in range(len(w) - 1) if w[j] == w[j + 1]] + [j for j, c in enumerate(w) if c in "ьъ"]
-        if js:
-            j = rng.choice(js)
-            return w[:j] + w[j + 1 :]
-    if lang == "ru" and w.endswith("ться"):
-        return w[:-4] + "тся"
-    if lang == "ru" and w.endswith("тся"):
-        return w[:-3] + "ться"
+    if r < 0.62:
+        return w[:i] + rng.choice(ALPHABET[lang]) + w[i + 1 :]
+    if r < 0.64 and len(w) >= 6:
+        return w[:-2]  # не дожатое окончание («заголов», «рабоат»)
+    # пропуск; удвоенная буква, ь/ъ и й — чаще («сесии», «ждеш», «интерфес»)
+    doubles = [j for j in range(len(w) - 1) if w[j] == w[j + 1]]
+    soft = [j for j, c in enumerate(w) if c in "ьъй"] if ru else []
+    r2 = rng.random()
+    if doubles and r2 < 0.8:
+        i = rng.choice(doubles)
+    elif soft and r2 < 0.9:
+        i = rng.choice(soft)
     return w[:i] + w[i + 1 :]

@@ -176,6 +176,11 @@ fn start_install(hwnd: HWND) {
     let Some(rel) = update::AVAILABLE.lock().unwrap().clone() else { return };
     let h = hwnd.0 as isize;
     std::thread::spawn(move || {
+        // найденное раньше могло устареть: взять самый свежий релиз
+        let rel = match update::check() {
+            Ok(Some(newer)) => newer,
+            _ => rel,
+        };
         notify("AntiPunto", format!("Загружаю версию {}…", rel.version));
         match update::install(&rel) {
             // установщик сам перезапустит программу

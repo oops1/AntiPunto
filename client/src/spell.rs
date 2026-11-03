@@ -269,7 +269,7 @@ impl Dict {
     }
 
     /// Словарные слова в пределах 2 правок и до SPLITS разбивок: (расстояние, −частота, слово), лучшие первыми.
-    pub fn candidates(&self, typed: &str, splits: bool) -> Vec<String> {
+    pub fn candidates(&self, typed: &str) -> Vec<String> {
         let t: Vec<char> = typed.chars().collect();
         let mut found = Vec::new();
         self.near(&t, &mut found);
@@ -287,8 +287,8 @@ impl Dict {
             .collect();
         words.sort();
         // разбивка — это ещё и вставленный пробел: ей допускаем на правку больше
-        let all = if splits { self.splits(&t) } else { Vec::new() };
-        let mut parts: Vec<(usize, i64, String)> = all
+        let mut parts: Vec<(usize, i64, String)> = self
+            .splits(&t)
             .into_iter()
             .map(|s| (osa(&t, &s.chars().collect::<Vec<_>>()), -(self.freq_of(&s) as i64), s))
             .filter(|&(d, _, _)| d <= 3)
@@ -375,21 +375,12 @@ pub struct Speller {
     /// Словоформы OpenCorpora и частые слова корпусов: такие не исправляем.
     pub known: Option<Known>,
     model: Model,
-    /// Второй проход: разбивки там, где первый не уверен.
-    split: Option<Model>,
     pub threshold: f32,
 }
 
 impl Speller {
-    pub fn new(
-        ru: Dict,
-        en: Dict,
-        known: Option<Known>,
-        model: Model,
-        split: Option<Model>,
-        threshold: f32,
-    ) -> Speller {
-        Speller { ru, en, known, model, split, threshold }
+    pub fn new(ru: Dict, en: Dict, known: Option<Known>, model: Model, threshold: f32) -> Speller {
+        Speller { ru, en, known, model, threshold }
     }
 
     pub fn dict(&self, ru: bool) -> &Dict {
@@ -408,19 +399,11 @@ impl Speller {
         if d.contains(typed) || self.known.as_ref().is_some_and(|k| k.contains(typed)) {
             return Ok(None);
         }
-        let cands = d.candidates(typed, false);
-        let first = if cands.is_empty() { None } else { Some(Self::score(d, &mut self.model, ctx, typed, &cands)?) };
-        if first.as_ref().is_some_and(|v| v[0].0 != typed && v[0].1 >= self.threshold) {
-            return Ok(first);
+        let cands = d.candidates(typed);
+        if cands.is_empty() {
+            return Ok(None);
         }
-        let Some(m) = self.split.as_mut() else { return Ok(first) };
-        let all = d.candidates(typed, true);
-        if !all.iter().any(|c| c.contains(' ')) {
-            return Ok(first);
-        }
-        let second = Self::score(d, m, ctx, typed, &all)?;
-        // второй проход отвечает только разбивкой
-        Ok(if second[0].0.contains(' ') { Some(second) } else { first })
+        Self::score(d, &mut self.model, ctx, typed, &cands).map(Some)
     }
 
     fn score(
@@ -490,7 +473,7 @@ mod tests {
             let (lang, typed) = (parts.next().unwrap(), parts.next().unwrap());
             let want: Vec<&str> = parts.next().unwrap_or("").split('|').filter(|s| !s.is_empty()).collect();
             let d = if lang == "ru" { &ru } else { &en };
-            assert_eq!(d.candidates(typed, true), want, "{typed}");
+            assert_eq!(d.candidates(typed), want, "{typed}");
             n += 1;
         }
         assert!(n >= 50, "мало примеров: {n}");
@@ -512,7 +495,7 @@ mod tests {
             }
             let t1 = t0.elapsed();
             let n = found.len();
-            let c = ru.candidates(w, true);
+            let c = ru.candidates(w);
             println!("{w}: найдено {n}, поиск {t1:?}, всего {:?}, {}", t0.elapsed(), c.len());
         }
     }

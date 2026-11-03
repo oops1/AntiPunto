@@ -27,16 +27,22 @@ def forms(morph, lemma: str, pos: str, like: str | None) -> set[str]:
     return {f.word for f in p.lexeme} if p else {lemma}
 
 
-def add(path: Path = paths.ROOT / "spell" / "ru.tsv") -> int:
+def words() -> set[str]:
+    """Все формы жаргона."""
     morph = pymorphy3.MorphAnalyzer()
-    rows = path.read_text(encoding="utf-8").splitlines()
-    have = {r.split("\t")[0] for r in rows}
-    new = set()
+    out: set[str] = set()
     for line in SRC.read_text(encoding="utf-8").splitlines():
         if not line.strip() or line.startswith("#"):
             continue
         lemma, pos, *like = line.split()
-        new |= forms(morph, lemma, pos, like[0] if like else None)
+        out |= forms(morph, lemma, pos, like[0] if like else None)
+    return out
+
+
+def add(path: Path = paths.ROOT / "spell" / "ru.tsv") -> int:
+    rows = path.read_text(encoding="utf-8").splitlines()
+    have = {r.split("\t")[0] for r in rows}
+    new = words()
     new = sorted(w.replace("ё", "е") if w.replace("ё", "е") in have else w for w in new - have)
     new = [w for w in new if w not in have]
     path.write_text("\n".join(rows + [f"{w}\t{FREQ}" for w in new]) + "\n", encoding="utf-8")

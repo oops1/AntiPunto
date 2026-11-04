@@ -1,8 +1,10 @@
-"""Открытые наборы опечаток (ai-forever/spellcheck_benchmark) → пары «опечатка, верное, контекст».
+"""Открытые наборы опечаток → пары «опечатка, верное, контекст» (данные — не в репозитории).
 
-python spell_open.py <папка data бенчмарка> → spell/open_pairs.tsv (данные — не в репозитории).
+python spell_open.py <папка data ai-forever/spellcheck_benchmark> → spell/open_pairs.tsv
+python spell_open.py --en <parquet GitHub Typo Corpus> <список ошибок Википедии> → spell/open_pairs_en.tsv
 Предложения выравниваются по словам; берутся замены одного слова на одно (≤ 2 правки)
-и одного на два (пропущенный пробел).
+и одного на два (пропущенный пробел). Парам без контекста (список Википедии) контекст
+подбирается из предложений корпуса с верным словом.
 """
 
 import difflib
@@ -17,11 +19,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 import paths
 from spell_common import Dictionary, osa
 
-WORD = re.compile(r"[А-Яа-яЁё]+")
+WORDS = {"ru": re.compile(r"[А-Яа-яЁё]+"), "en": re.compile(r"[A-Za-z]+")}
+WORD = WORDS["ru"]
 SKIP_DOMAINS = {"MedSpellchecker"}
 
 
-def pairs(src: str, cor: str):
+def pairs(src: str, cor: str, lang: str = "ru"):
+    WORD = WORDS[lang]
     a = [(m.group(), m.start()) for m in WORD.finditer(src)]
     b = [m.group() for m in WORD.finditer(cor)]
     sm = difflib.SequenceMatcher(None, [w.lower() for w, _ in a], [w.lower() for w in b], autojunk=False)
@@ -68,6 +72,72 @@ def main(root: Path):
         print(f"{k}: {v}")
 
 
+def prose(line: str) -> bool:
+    """Строка из коммита похожа на текст, а не на код."""
+    letters = sum(c.isalpha() or c == " " for c in line)
+    return len(line) >= 20 and letters / len(line) > 0.8 and len(WORDS["en"].findall(line)) >= 4
+
+
+def main_en(parquet: Path, wiki_list: Path):
+    import pyarrow.parquet as pq
+
+    d = Dictionary("en")
+    out, stats = [], Counter()
+    t = pq.read_table(parquet).to_pydict()
+    for src, cor in zip(t["text"], t["correction"]):
+        if not prose(src) or not src.isascii():
+            continue
+        stats["строк текста"] += 1
+        for typed, target, ctx in pairs(src, cor, "en"):
+            if target.replace(" ", "") not in d.freq and target not in d.freq:
+                continue  # имена из кода
+            kind = "split" if " " in target else "typo"
+            where = "словарное" if typed in d.freq else "вне словаря"
+            stats[f"{kind}, {where}"] += 1
+            out.append((typed, target, ctx.replace("\r", " "), "github_typo_corpus", kind, where))
+        # слова вне словаря, оставленные правкой, — «не трогать» (не больше одного со строки)
+        kept = set(WORDS["en"].findall(cor.lower()))
+        for m in WORDS["en"].finditer(src):
+            w = m.group()
+            if w.islower() and 3 <= len(w) <= 20 and w not in d.freq and w in kept and stats["keep, вне словаря"] < 30000:
+                stats["keep, вне словаря"] += 1
+                ctx = src[max(0, m.start() - 60) : m.start()].replace("\t", " ").replace("\r", " ")
+                out.append((w, "", ctx, "github_typo_corpus", "keep", "вне словаря"))
+                break
+    # список Википедии: пары без контекста, контекст — из предложений корпуса с верным словом
+    wiki = []
+    for line in wiki_list.read_text(encoding="utf-8").splitlines():
+        if "->" not in line:
+            continue
+        w, rest = line.split("->", 1)
+        w, targets = w.strip().lower(), [x.strip().lower() for x in rest.split(",")]
+        if WORDS["en"].fullmatch(w) and 3 <= len(w) <= 20 and w not in d.freq and targets[0] in d.freq:
+            wiki.append((w, targets[0]))
+    need = {t for _, t in wiki}
+    ctxs: dict[str, list[str]] = {}
+    with open(paths.CORPUS / "en.train.txt", encoding="utf-8") as f:
+        for i, line in enumerate(f):
+            if i >= 1_500_000:
+                break
+            low = line.lower()
+            for m in WORDS["en"].finditer(low):
+                w = m.group()
+                if w in need and len(ctxs.setdefault(w, [])) < 2:
+                    ctxs[w].append(line[max(0, m.start() - 60) : m.start()].replace("\t", " ").strip())
+    for w, t in wiki:
+        for ctx in ctxs.get(t, []):
+            stats["wiki typo, вне словаря"] += 1
+            out.append((w, t, ctx, "wikipedia_misspellings", "typo", "вне словаря"))
+    lines = ["слово\tверное\tконтекст\tисточник\tтип\tнабранное"]
+    lines += ["\t".join(r) for r in out]
+    (paths.ROOT / "spell" / "open_pairs_en.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    for k, v in sorted(stats.items()):
+        print(f"{k}: {v}")
+
+
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
-    main(Path(sys.argv[1]))
+    if sys.argv[1] == "--en":
+        main_en(Path(sys.argv[2]), Path(sys.argv[3]))
+    else:
+        main(Path(sys.argv[1]))

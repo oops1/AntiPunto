@@ -52,9 +52,13 @@ def group(d: Dictionary, known: Bloom, typed: str, target: str | None, ctx: str)
     return rows, mask, y
 
 
-def open_cases():
-    for line in (DATA / "open_pairs.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-        w, t, ctx, _src, _kind, where = line.split("\t")
+def open_cases(lang: str = "ru"):
+    name = "open_pairs.tsv" if lang == "ru" else "open_pairs_en.tsv"
+    for line in (DATA / name).read_text(encoding="utf-8").split("\n")[1:]:
+        parts = line.split("\t")
+        if len(parts) != 6:
+            continue
+        w, t, ctx, _src, _kind, where = parts
         if where == "вне словаря":
             yield w, t or None, ctx
 
@@ -98,10 +102,13 @@ if __name__ == "__main__":
     ap.add_argument("--every", type=int, default=250)
     ap.add_argument("--mine", type=int, default=1, help="во сколько раз повторить свои случаи")
     ap.add_argument("--keep-cap", type=int, default=10**9, help="не больше стольких открытых «оставить»")
+    ap.add_argument("--en", type=int, default=0, help="сколько английских открытых пар добавить (0 — без английского)")
     a = ap.parse_args()
     dev = torch.device("cuda")
     torch.manual_seed(0)
-    d, known = Dictionary("ru"), Bloom(MODELS / "spell_known.bloom")
+    known = Bloom(MODELS / "spell_known.bloom")
+    dicts = {"ru": Dictionary("ru"), "en": Dictionary("en")}
+    d = dicts["ru"]
 
     mine = real.load_cases()
     half = lambda c: zlib.crc32(c[0].encode()) % 2
@@ -111,8 +118,8 @@ if __name__ == "__main__":
     open_val = [c for c in opened if zlib.crc32(c[0].encode()) % 10 == 0]
     open_tr = [c for c in opened if zlib.crc32(c[0].encode()) % 10 != 0]
 
-    def build(cases):
-        gs = [g for g in (group(d, known, w, t, ctx) for w, t, ctx in cases) if g]
+    def build(cases, lang="ru"):
+        gs = [g for g in (group(dicts[lang], known, w, t, ctx) for w, t, ctx in cases) if g]
         return tensors(gs, dev), (sum(1 for c in cases if c[1]), sum(1 for c in cases if not c[1]))
 
     keeps = [c for c in open_tr if not c[1]][: a.keep_cap]
@@ -120,6 +127,17 @@ if __name__ == "__main__":
     train_real, _ = build(open_tr + mine_dev * a.mine)
     val_open, tot_open = build(open_val)
     held, tot_held = build(mine_held)
+    if a.en:
+        import random
+
+        en = list(open_cases("en"))
+        random.Random(0).shuffle(en)
+        en_val = [c for c in en if zlib.crc32(c[0].encode()) % 10 == 0][:3000]
+        en_tr = [c for c in en if zlib.crc32(c[0].encode()) % 10 != 0][: a.en]
+        en_train, _ = build(en_tr, "en")
+        val_en, tot_en = build(en_val, "en")
+        train_real = tuple(torch.cat([x, y]) for x, y in zip(train_real, en_train))
+        print(f"английских групп {len(en_train[0])} («оставить» {(en_train[2] == 0).float().mean():.2f}), отбор по {len(val_en[0])}", flush=True)
     synth, valid = load("train", dev), load("valid", dev)
     print(
         f"настоящих групп для обучения {len(train_real[0])} (открытых {len(open_tr)}, своих {len(mine_dev)}), "
@@ -141,9 +159,14 @@ if __name__ == "__main__":
             f"открытые как клиент: {client_score(model, val_open, tot_open)} | свои held: {client_score(model, held, tot_held)}",
             flush=True,
         )
+        if a.en:
+            print(f"    английские как клиент: {client_score(model, val_en, tot_en)}", flush=True)
         if step == 0 or step == a.steps:
             for t in (0.6, 0.65, 0.7, 0.8):
-                print(f"    порог {t:.2f}: открытые {client_score(model, val_open, tot_open, t)} | свои held {client_score(model, held, tot_held, t)}", flush=True)
+                line = f"    порог {t:.2f}: открытые {client_score(model, val_open, tot_open, t)} | свои held {client_score(model, held, tot_held, t)}"
+                if a.en:
+                    line += f" | английские {client_score(model, val_en, tot_en, t)}"
+                print(line, flush=True)
         return oacc, vacc
 
     base_open, base_synth = report(0)

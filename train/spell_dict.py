@@ -64,7 +64,20 @@ def build(lang: str, limit: int = 3_000_000) -> None:
     ok = lambda w, c: known(w) if lang == "ru" else (wiki[w] >= 3 or c >= 200)
     words = [(w, c) for w, c in cnt.most_common() if c >= 3 and len(w) <= 24 and (ok(w, c) or wiki[w] >= 3)]
     words = words[: TOP[lang]]
-    junk = (lambda w: False) if lang != "ru" else junk_rule([w for w, _ in words if known(w)], cnt, wiki, known)
+    if lang == "ru":
+        junk = junk_rule([w for w, _ in words if known(w)], cnt, wiki, known)
+    else:
+        # без морфологии: «настоящее» — есть в списке английских слов (en_wordlist.txt) или часто
+        # в Википедии; чёрный список — частые ошибки Википедии; частое в корпусах (≥ 200) не трогаем:
+        # «mustn», «havin» из субтитров клиент видит как слова
+        bad, wordlist = set(), set()
+        if (OUT / "en_misspellings.txt").exists():
+            bad = {l.split("->")[0].strip().lower() for l in (OUT / "en_misspellings.txt").read_text(encoding="utf-8").splitlines() if "->" in l}
+        if (OUT / "en_wordlist.txt").exists():
+            wordlist = set((OUT / "en_wordlist.txt").read_text(encoding="utf-8").split())
+        sure = lambda w: (w in wordlist or wiki[w] >= JUNK_WIKI) and w not in bad
+        rule = junk_rule([w for w, _ in words if sure(w)], cnt, wiki, sure)
+        junk = lambda w: w in bad or (cnt[w] < 200 and rule(w))
     words = [(w, c) for w, c in words if not junk(w)]
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"{lang}.tsv").write_text("".join(f"{w}\t{c}\n" for w, c in words), encoding="utf-8")

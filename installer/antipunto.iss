@@ -55,6 +55,11 @@ Name: "{userprograms}\AntiPunto"; Filename: "{app}\antipunto.exe"
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "AntiPunto"; ValueData: """{app}\antipunto.exe"""; Tasks: autostart; Flags: uninsdeletevalue
 Root: HKCU; Subkey: "Software\AntiPunto"; Flags: uninsdeletekey
 
+[InstallDelete]
+; вторая модель до 0.5.1: больше не используется
+Type: files; Name: "{app}\models\spell_split.xml"
+Type: files; Name: "{app}\models\spell_split.bin"
+
 [Run]
 Filename: "{app}\antipunto.exe"; Description: "{cm:LaunchNow}"; Flags: nowait postinstall
 

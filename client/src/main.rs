@@ -59,7 +59,7 @@ fn config() -> (Config, Option<String>) {
         update_check: true,
         expect: None,
         spell: true,
-        spell_threshold: 0.75,
+        spell_threshold: 0.70,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);

@@ -29,6 +29,13 @@ def load_cases():
     cases = []
     lines = (DATA / "real_ru_labels.tsv").read_text(encoding="utf-8").splitlines()[1:]
     counts = dict(l.split("\t")[:2] for l in (DATA / "real_ru_unlabeled.tsv").read_text(encoding="utf-8").splitlines()[1:])
+    # вторая партия разметки (04.11): счётчики — из real_words.tsv
+    if (DATA / "real_ru_labels2.tsv").exists():
+        lines += (DATA / "real_ru_labels2.tsv").read_text(encoding="utf-8").splitlines()[1:]
+        for line in (DATA / "real_words.tsv").read_text(encoding="utf-8").splitlines()[1:]:
+            p = line.split("\t")
+            if len(p) >= 3 and p[0] == "ru":
+                counts.setdefault(p[1], p[2])
     for line in lines:
         w, label, cls = line.split("\t")[:3]
         if (cls in ("typo", "jargon_typo") and " " not in label) or cls == "split":

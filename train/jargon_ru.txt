@@ -257,3 +257,11 @@
 здаров ADVB
 покеда ADVB
 инэт NOUN
+баг NOUN
+фид NOUN
+трей NOUN
+форк NOUN
+прото NOUN кино
+путти NOUN кино
+фар NOUN бар
+дев NOUN кино

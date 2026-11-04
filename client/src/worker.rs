@@ -19,6 +19,7 @@ use crate::focus::Focus;
 use crate::hook::{CORRECTING, Event, HAS_WORD, Key, UNDO_READY, is_modifier};
 use crate::keymap::{KEYMAP, OTHER, SPACE};
 use crate::lists::{self, Lists};
+use crate::memory::Memory;
 use crate::ov::Model;
 use crate::popup;
 use crate::spell::Speller;
@@ -49,6 +50,8 @@ impl Mods {
 
 /// Варианты ниже этой уверенности не показываем.
 const OFFER_MIN_P: f32 = 0.05;
+/// Для словарного слова варианты показываем только заметные.
+const OFFER_DICT_MIN_P: f32 = 0.8;
 
 /// Результат орфографии для последнего слова: границы в буфере и варианты.
 struct Checked {
@@ -56,6 +59,7 @@ struct Checked {
     b: usize,
     word: String,
     ranked: Vec<(String, f32)>,
+    in_dict: bool,
 }
 
 /// Варианты для слова a..b в буфере; text — что там сейчас на экране.
@@ -72,6 +76,8 @@ struct Undo {
     text: String,
     old: String,
     old_lay: u8,
+    /// Словарное слово, которое заменила орфография: отмена делает его своим.
+    word: Option<String>,
 }
 
 struct Worker {
@@ -79,6 +85,8 @@ struct Worker {
     model: Model,
     focus: Focus,
     lists: Lists,
+    /// Свои слова: словарные, набранные и оставленные пользователем.
+    memory: Memory,
     buf: Buffer,
     mods: Mods,
     caps: bool,
@@ -303,20 +311,24 @@ impl Worker {
         if self.lists.ignore.contains(&word) || self.lists.force.contains(&word) {
             return None;
         }
-        let ranked = sp.rank(&ctx, &word, ru).ok()??;
-        if self.cfg.debug {
-            let top: Vec<String> = ranked.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
-            println!("  орфография: «{word}» {}", top.join(" "));
+        if self.memory.safe(&word) && sp.dict(ru).contains(&word) {
+            return None;
         }
-        Some(Checked { a, b, word, ranked })
+        let r = sp.rank(&ctx, &word, ru).ok()??;
+        if self.cfg.debug {
+            let top: Vec<String> = r.items.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
+            println!("  орфография: «{word}»{} {}", if r.in_dict { " (словарное)" } else { "" }, top.join(" "));
+        }
+        Some(Checked { a, b, word, ranked: r.items, in_dict: r.in_dict })
     }
 
     /// Варианты для окна у курсора; fixed — лучший уже подставлен.
     fn offer_items(c: &Checked, fixed: bool) -> Vec<String> {
+        let min_p = if c.in_dict { OFFER_DICT_MIN_P } else { OFFER_MIN_P };
         let mut items: Vec<String> = c
             .ranked
             .iter()
-            .filter(|(w, p)| *w != c.word && *p >= OFFER_MIN_P)
+            .filter(|(w, p)| *w != c.word && *p >= min_p)
             .skip(fixed as usize)
             .map(|(w, _)| w.clone())
             .take(popup::PER_ROW - fixed as usize)
@@ -420,7 +432,8 @@ impl Worker {
                     x.a = (x.a as isize + delta) as usize;
                     x.b = (x.b as isize + delta) as usize;
                 }
-                self.undo = Some(Undo { before: before.clone(), text, old, old_lay: before.chars[o.a].lay });
+                self.undo =
+                    Some(Undo { before: before.clone(), text, old, old_lay: before.chars[o.a].lay, word: None });
                 UNDO_READY.store(true, SeqCst);
             } else {
                 self.buf.clear();
@@ -446,6 +459,9 @@ impl Worker {
                 self.buf.freeze();
                 input::switch_layout(u.old_lay);
                 self.stats.undos += 1;
+                if let Some(w) = &u.word {
+                    self.memory.hit(w, crate::memory::SAFE);
+                }
                 if self.cfg.debug {
                     println!("отмена: «{}» → «{}»", u.text, u.old);
                 }
@@ -529,11 +545,17 @@ impl Worker {
             }
         };
         let checked = self.spell_check(plan.as_ref());
-        let thr = self.speller.as_ref().map_or(f32::INFINITY, |s| s.threshold);
         let spell = checked.as_ref().and_then(|c| {
+            let thr = self.speller.as_ref().map_or(f32::INFINITY, |s| s.threshold_for(c.in_dict));
             let (w, p) = &c.ranked[0];
             (*w != c.word && *p >= thr).then(|| (c.a, c.b, w.clone(), *p))
         });
+        let dict_word = checked.as_ref().filter(|c| c.in_dict).map(|c| c.word.clone());
+        if let Some(w) = &dict_word
+            && spell.is_none()
+        {
+            self.memory.hit(w, 1);
+        }
         // слово после автоправки могло стать длиннее
         let offer = checked.filter(|_| offer_ok).map(|c| {
             let b = spell.as_ref().map_or(c.b, |s| c.a + s.2.chars().count());
@@ -608,7 +630,8 @@ impl Worker {
                         let p = spell.as_ref().map_or(String::new(), |s| format!(" (орфография {:.2})", s.3));
                         println!("«{old}» → «{text}»{p}");
                     }
-                    self.undo = Some(Undo { before, text, old, old_lay });
+                    let word = if spell.is_some() { dict_word.clone() } else { None };
+                    self.undo = Some(Undo { before, text, old, old_lay, word });
                     // Backspace отменяет, только если после правки ничего не набрано
                     if !typed_more {
                         UNDO_READY.store(true, SeqCst);
@@ -652,6 +675,7 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
     lists::ensure_files();
     lists::watch();
     let mut lists = Lists::default();
+    let memory = Memory::load();
     lists.refresh();
     let stats = Stats::load();
     let mut saver = Saver::new(&stats);
@@ -660,6 +684,7 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         model,
         focus: Focus::new(),
         lists,
+        memory,
         buf: Buffer::default(),
         mods: Mods::default(),
         caps,

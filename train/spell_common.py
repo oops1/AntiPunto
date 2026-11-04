@@ -123,6 +123,10 @@ class Dictionary:
         for v in edits1(typed, self.alpha):
             self.near(v, found)
         found.discard(typed)
+        if typed in self.freq:
+            # словарное слово: вариант, отличный только буквой ё, — не правка
+            plain = typed.replace("ё", "е")
+            found = {w for w in found if w.replace("ё", "е") != plain}
         words = sorted((osa(typed, w), -self.freq[w], w) for w in found)
         words = [s for s in words if s[0] <= 2]
         # разбивка — это ещё и вставленный пробел: ей допускаем на правку больше

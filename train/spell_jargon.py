@@ -41,8 +41,14 @@ def words() -> set[str]:
 
 def add(path: Path = paths.ROOT / "spell" / "ru.tsv") -> int:
     rows = path.read_text(encoding="utf-8").splitlines()
-    have = {r.split("\t")[0] for r in rows}
     new = words()
+    # жаргон, бывший в словаре с малой частотой корпуса: не реже FREQ, иначе модель сочтёт его ошибкой
+    plain = {w.replace("ё", "е") for w in new}
+    for i, r in enumerate(rows):
+        w, c = r.split("\t")
+        if w.replace("ё", "е") in plain and int(c) < FREQ:
+            rows[i] = f"{w}\t{FREQ}"
+    have = {r.split("\t")[0] for r in rows}
     new = sorted(w.replace("ё", "е") if w.replace("ё", "е") in have else w for w in new - have)
     new = [w for w in new if w not in have]
     path.write_text("\n".join(rows + [f"{w}\t{FREQ}" for w in new]) + "\n", encoding="utf-8")

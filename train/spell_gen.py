@@ -1,4 +1,9 @@
-"""Группы для ранжировщика: контекст, опечатка, K кандидатов, номер верного."""
+"""Группы для ранжировщика: контекст, опечатка, K кандидатов, номер верного.
+
+--kind typo (по умолчанию): набранное — вне словаря (опечатка, слитное или редкое правильное слово).
+--kind dict: набранное — словарное слово; ошибка, совпавшая с другим словом («бела» → «была»),
+или правильное слово, которое надо оставить. У строки 0 — частота набранного.
+"""
 
 import argparse
 import multiprocessing as mp
@@ -20,14 +25,17 @@ from spell_known import MODELS
 WORDS = {"ru": re.compile(r"[а-яё]+"), "en": re.compile(r"[a-z]+")}
 P_KEEP = 0.35  # доля групп «правильное редкое слово — не трогать»
 P_SPLIT = 0.2  # доля опечаток «пропущен пробел»: «вчем» → «в чем»
+P_RW = 0.4  # словарный режим: доля попыток сделать ошибку, совпавшую со словом
 
 _dicts: dict[str, Dictionary] = {}
 _keep: dict[str, list[str]] = {}
 _known: Bloom | None = None
+_kind = "typo"
 
 
-def init(split: str):
-    global _known
+def init(split: str, kind: str = "typo"):
+    global _known, _kind
+    _kind = kind
     _known = Bloom(MODELS / "spell_known.bloom")
     for lang in ("ru", "en"):
         _dicts[lang] = Dictionary(lang)
@@ -103,12 +111,45 @@ def group(lang: str, sent: str, rng: random.Random):
     return rows, mask, 0 if target is None else opts.index(target)
 
 
+def group_dict(lang: str, sent: str, rng: random.Random):
+    """Словарное слово из текста: ошибка, ставшая другим словом, или «оставить»."""
+    d = _dicts[lang]
+    spans = [(m.start(), m.end()) for m in WORDS[lang].finditer(sent.lower())]
+    spans = [(s, e) for s, e in spans if e - s >= 3 and sent[s:e].lower() in d.freq]
+    if not spans:
+        return None
+    a, b = rng.choice(spans)
+    ctx, word = sent[:a], sent[a:b].lower()
+    typed, target = word, None
+    if rng.random() < P_RW:
+        for _ in range(4):
+            typed = corrupt(word, lang, rng)
+            if typed != word and typed in d.freq:
+                break
+        else:
+            return None
+        target = word
+    if not 3 <= len(typed) <= 20:
+        return None  # клиент проверяет слова от 3 букв
+    cands = d.candidates(typed)
+    if not cands or (target is not None and target not in cands):
+        return None
+    rows = np.zeros((K, L), np.uint8)
+    rows[0] = row(ctx, typed, typed, 0, 0, d.freq[typed])
+    for j, c in enumerate(cands, 1):
+        rows[j] = row(ctx, typed, c, j, osa(typed, c), d.freq_of(c))
+    mask = np.zeros(K, np.uint8)
+    mask[: len(cands) + 1] = 1
+    return rows, mask, 0 if target is None else cands.index(target) + 1
+
+
 def work(job):
     seed, items = job
     rng = random.Random(seed)
     X, M, Y = [], [], []
+    make = group_dict if _kind == "dict" else group
     for lang, sent in items:
-        g = group(lang, sent, rng)
+        g = make(lang, sent, rng)
         if g:
             X.append(g[0])
             M.append(g[1])
@@ -132,16 +173,18 @@ if __name__ == "__main__":
     ap.add_argument("--split", default="train")
     ap.add_argument("--n", type=int, default=900_000)
     ap.add_argument("--procs", type=int, default=10)
+    ap.add_argument("--kind", default="typo", choices=("typo", "dict"))
     a = ap.parse_args()
-    rng = random.Random(1 if a.split == "train" else 2)
+    rng = random.Random((1 if a.split == "train" else 2) + (10 if a.kind == "dict" else 0))
     sents = {lang: load(a.split, lang) for lang in ("ru", "en")}
     jobs = []
     for c in range(0, a.n, 20000):
         items = [("ru" if rng.random() < 0.7 else "en",) for _ in range(min(20000, a.n - c))]
         items = [(l[0], rng.choice(sents[l[0]])) for l in items]
         jobs.append((rng.getrandbits(32), items))
-    with mp.Pool(a.procs, initializer=init, initargs=(a.split,)) as pool:
+    with mp.Pool(a.procs, initializer=init, initargs=(a.split, a.kind)) as pool:
         parts = pool.map(work, jobs)
     X, M, Y = (np.concatenate([p[i] for p in parts]) for i in range(3))
-    np.savez(paths.ROOT / "spell" / f"{a.split}.npz", x=X, m=M, y=Y)
-    print(f"{a.split}: групп {len(X)}, «оставить» {(Y == 0).mean():.2f}, кандидатов в среднем {M.sum(1).mean():.1f}")
+    name = f"{a.split}.npz" if a.kind == "typo" else f"dict_{a.split}.npz"
+    np.savez(paths.ROOT / "spell" / name, x=X, m=M, y=Y)
+    print(f"{name}: групп {len(X)}, «оставить» {(Y == 0).mean():.2f}, кандидатов в среднем {M.sum(1).mean():.1f}")

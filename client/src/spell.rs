@@ -278,10 +278,13 @@ impl Dict {
         }
         found.sort_unstable();
         found.dedup();
+        // словарное слово: вариант, отличный только буквой ё, — не правка
+        let in_dict = self.contains(typed);
+        let plain = typed.replace('ё', "е");
         let mut words: Vec<(usize, i64, String)> = found
             .into_iter()
             .map(|i| (i, self.word(i)))
-            .filter(|&(_, w)| w != typed)
+            .filter(|&(_, w)| w != typed && !(in_dict && w.replace('ё', "е") == plain))
             .map(|(i, w)| (osa(&t, &w.chars().collect::<Vec<_>>()), -(self.freq[i as usize] as i64), w.to_string()))
             .filter(|&(d, _, _)| d <= 2)
             .collect();
@@ -369,41 +372,51 @@ pub fn row(ctx: &str, typed: &str, cand: &str, rank: usize, dist: usize, freq: u
     out
 }
 
+/// Варианты модели, лучший первым; typed среди них — «оставить».
+pub struct Ranked {
+    pub items: Vec<(String, f32)>,
+    /// Набранное — словарное слово: ошибка могла совпасть с другим словом («бела» → «была»).
+    pub in_dict: bool,
+}
+
 pub struct Speller {
     pub ru: Dict,
     pub en: Dict,
-    /// Словоформы OpenCorpora и частые слова корпусов: такие не исправляем.
+    /// Словоформы OpenCorpora и частые слова корпусов вне словаря: такие не исправляем.
     pub known: Option<Known>,
     model: Model,
     pub threshold: f32,
+    /// Порог для словарных слов: выше, цена ложной правки больше.
+    pub dict_threshold: f32,
 }
 
 impl Speller {
-    pub fn new(ru: Dict, en: Dict, known: Option<Known>, model: Model, threshold: f32) -> Speller {
-        Speller { ru, en, known, model, threshold }
+    pub fn new(ru: Dict, en: Dict, known: Option<Known>, model: Model, threshold: f32, dict_threshold: f32) -> Speller {
+        Speller { ru, en, known, model, threshold, dict_threshold }
     }
 
     pub fn dict(&self, ru: bool) -> &Dict {
         if ru { &self.ru } else { &self.en }
     }
 
-    /// Выбор модели и его вероятность (выбор == typed — оставить); None — не спрашивали.
-    pub fn suggest(&mut self, ctx: &str, typed: &str, ru: bool) -> Result<Option<(String, f32)>, String> {
-        Ok(self.rank(ctx, typed, ru)?.map(|mut v| v.swap_remove(0)))
+    pub fn threshold_for(&self, in_dict: bool) -> f32 {
+        if in_dict { self.dict_threshold } else { self.threshold }
     }
 
-    /// Все варианты с вероятностями, лучший первым; typed — «оставить».
-    pub fn rank(&mut self, ctx: &str, typed: &str, ru: bool) -> Result<Option<Vec<(String, f32)>>, String> {
+    /// Все варианты с вероятностями; None — не спрашивали (известное слово вне словаря).
+    pub fn rank(&mut self, ctx: &str, typed: &str, ru: bool) -> Result<Option<Ranked>, String> {
         // поля по отдельности: модель занимаем мутабельно
         let d = if ru { &self.ru } else { &self.en };
-        if d.contains(typed) || self.known.as_ref().is_some_and(|k| k.contains(typed)) {
+        let in_dict = d.contains(typed);
+        if !in_dict && self.known.as_ref().is_some_and(|k| k.contains(typed)) {
             return Ok(None);
         }
         let cands = d.candidates(typed);
         if cands.is_empty() {
             return Ok(None);
         }
-        Self::score(d, &mut self.model, ctx, typed, &cands).map(Some)
+        let items = Self::score(d, &mut self.model, ctx, typed, &cands)?;
+        Ok(Some(Ranked { items, in_dict }))
     }
 
     fn score(
@@ -416,7 +429,8 @@ impl Speller {
         let mut x = vec![PAD; K * L];
         let opts: Vec<&str> = std::iter::once(typed).chain(cands.iter().map(String::as_str)).collect();
         let t: Vec<char> = typed.chars().collect();
-        x[..L].copy_from_slice(&row(ctx, typed, typed, 0, 0, 0));
+        // у словарного слова строка «оставить» несёт его частоту
+        x[..L].copy_from_slice(&row(ctx, typed, typed, 0, 0, d.freq_of(typed)));
         for (j, c) in cands.iter().enumerate() {
             let dist = osa(&t, &c.chars().collect::<Vec<_>>());
             let r = row(ctx, typed, c, j + 1, dist, d.freq_of(c));

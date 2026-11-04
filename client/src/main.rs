@@ -7,6 +7,7 @@ mod hook;
 mod input;
 mod keymap;
 mod lists;
+mod memory;
 mod ov;
 mod popup;
 mod settings;
@@ -41,6 +42,7 @@ pub struct Config {
     pub expect: Option<String>,
     pub spell: bool,
     pub spell_threshold: f32,
+    pub spell_dict_threshold: f32,
 }
 
 fn config() -> (Config, Option<String>) {
@@ -60,6 +62,7 @@ fn config() -> (Config, Option<String>) {
         expect: None,
         spell: true,
         spell_threshold: 0.70,
+        spell_dict_threshold: 0.90,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);
@@ -76,6 +79,9 @@ fn config() -> (Config, Option<String>) {
             "--no-spell" => c.spell = false,
             "--spell-threshold" => {
                 c.spell_threshold = args.next().and_then(|v| v.parse().ok()).unwrap_or(c.spell_threshold)
+            }
+            "--spell-dict-threshold" => {
+                c.spell_dict_threshold = args.next().and_then(|v| v.parse().ok()).unwrap_or(c.spell_dict_threshold)
             }
             "--spelltest" => selftest = args.next().map(|t| format!("\u{2}{t}")),
             "--popup-demo" => {
@@ -115,7 +121,7 @@ pub fn load_speller(c: &Config) -> Result<spell::Speller, String> {
     let ru = spell::Dict::load(&dir.join("spell_ru.tsv"), true)?;
     let en = spell::Dict::load(&dir.join("spell_en.tsv"), false)?;
     let known = spell::Known::load(&dir.join("spell_known.bloom")).ok();
-    Ok(spell::Speller::new(ru, en, known, model, c.spell_threshold))
+    Ok(spell::Speller::new(ru, en, known, model, c.spell_threshold, c.spell_dict_threshold))
 }
 
 /// Орфография по словам фразы, как будто каждое слово только что набрано.
@@ -136,17 +142,18 @@ fn spelltest(c: &Config, text: &str) -> Result<(), String> {
         let word: String = chars[lead..chars.len() - trail].iter().collect();
         let t = std::time::Instant::now();
         let ranked = sp.rank(&format!("{ctx}{}", String::from_iter(&chars[..lead])), &word, ru)?;
-        let fix = ranked.as_ref().map(|v| v[0].clone());
-        if let Some(v) = &ranked {
-            let alt: Vec<String> = v.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
-            println!("  варианты: {}", alt.join(" "));
+        let fix = ranked.as_ref().map(|r| r.items[0].clone());
+        let thr = ranked.as_ref().map_or(f32::INFINITY, |r| sp.threshold_for(r.in_dict));
+        if let Some(r) = &ranked {
+            let alt: Vec<String> = r.items.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
+            println!("  варианты{}: {}", if r.in_dict { " (словарное)" } else { "" }, alt.join(" "));
         }
         let shown = match &fix {
             Some((w, p)) if *w == word => {
                 println!("  «{word}» оставить {p:.2}");
                 word
             }
-            Some((w, p)) if *p >= sp.threshold => {
+            Some((w, p)) if *p >= thr => {
                 println!("  «{word}» → «{w}» {p:.2} ({:?})", t.elapsed());
                 w.clone()
             }

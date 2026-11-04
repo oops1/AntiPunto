@@ -13,7 +13,7 @@ ru	езжик	ежик|език|мужик|ездил|езжу|езжу к|ез�
 ru	рабоате	работе|рабате|работы|работу|работал|работает|работать|работа|работа те|работ|работ те|работав|работаю|рабочие|работах
 ru	ёжк	жк|ёж|ёжик|мжк|тжк|ёк|ёжь|как|к|так|же|уже|уж|ж|ок
 ru	вчем	в чем|чем|всем|врем|вечем|воем|веем|выем|все|время|всех|вам|тем|зачем|всей
-ru	тутже	тут же|туже|туте|также|уже|тоже|тут|хуже|туре|тупые|турне|туле|тупое|тупее|луже
+ru	тутже	тут же|туже|туте|также|уже|тоже|тут|хуже|туре|тупые|турне|путте|туле|тупое|тупее
 ru	выпустирелиз	выпусти релиз|выпуск релиз|выпустил релиз
 ru	неблоы	не блок|небо|небом|не блог|неплох|не лозы|несло|нейлон|неелов|неёлов|нибло|нейлов|нейлом|нейлы|нейлоны
 ru	воригинае	в оригинал|оригинал|в оригинале|оригинале|веригина|вори гина|веригине
@@ -74,8 +74,37 @@ ru	прианко	при анко|франко|ариан ко|приманку|
 ru	обохначена	обозначена|обозначены|обозначен|обозначен а|обозначено|о охвачена|об охвачена|обхвачена
 ru	пвторяет	повторяет|потеряет|повторяют|повторяем|повторяете|покоряет|повторят|вторят|автор лет|автор нет|повтор лет
 ru	дафцни	дафни|дани|дафф ни|данни|дафна|дальни|дауни|дафны|даффи|да фини|давни|да фени|дафне|дакини|дафн
-ru	губери	убери|губер|губер и|губера|губерт|губерн|губернии|гибели|губерния|бери|побери|губерний|кубера|кубере|куберу
+ru	губери	убери|губер|губер и|губера|губерт|губерн|губернии|гибели|губерния|бери|побери|губерний|кубер|кубера|кубере
 ru	араы	арабы|ара|араб|арам|арап|арфы|арты|арах|арад|арды|аран|арак|арау|а раз|а рады
+ru	бела	была|дела|тела|села|белая|беда|вела|бла|белка|бета|бело|бега|пела|бена|ела
+ru	пне	не|мне|вне|сне|дне|пе|пен|пре|пнр|оне|пн|пни|ане|пене|ине
+ru	еще	ее|еле|еде|ещ|ще|еше|еве|теще|ере|еже|аще|леще|веще|не|его
+ru	все	всех|всем|всю|всей|вся|вне|вес|весе|вс|се|ве|всея|всу|вые|всм
+ru	была	был|был а|было|были|бла|быта|мыла|тыла|быка|быдла|бела|бпла|бала|била|быль
+ru	чт	что|от|т|ч|че|ст|чё|чо|эт|чет|ет|шт|чёт|вт|ит
+ru	кога	когда|кого|бога|кота|кода|кожа|нога|рога|кола|кока|кора|лога|коса|кого а|мог а
+ru	тоже	то же|боже|тож|томе|коже|роже|топе|ложе|тоне|оже|токе|торе|туже|тое|ноже
+ru	ветке	веке|ветки|ветка|ветку|сетке|ветре|детке|вятке|цветке|витке|тетке|венке|метке|в ветке|в сетке
+ru	ахах	хах|аха|амах|атах|шахах|арах|эхах|азах|ахал|бахах|ажах|ахам|анах|агах|авах
+ru	звонят	звонит|звенят|звоня|звонок|занят|звонил|звонить|извинят|звонки|воняет|звонка|звоню|во нет|во снят|звон нет
+ru	молитву	молитвы|молитва|молитв|молитв у|молитве|литву|молится|молитвой|молитвах|молитвою|молитвам|молить|молотку|моли туву|моли тыву
+ru	пера	пора|пара|петра|пер|вера|опера|перу|мера|хера|перл|пьера|пра|пела|перо|пена
+ru	создаёт	со даёт|создают|создаст|создаём|создаёте|сознаёт|воздаёт|солдат|создан|создать|союз даёт|создал|создана|созданы|с создаёт
+ru	различную	раз личную|различною|разливную|различных|различные|различным|различной|раза личную|различнее|различней|раз иную|различны|различное|различный|различно
+ru	игровую	игровою|тигровую|игривую|игровой|игрою|игроку|мировую|игровых|игровые|и игровую|игровая|игровом|игровым|и яровую|игры всю
+ru	общей	общем|общий|общее|общею|обще|обжей|облей|обей|обшей|о общей|общего|обе|общая|вещей|о бней
+ru	тюменской	тюменский|тюменском|тюменскою|тюменское|тюменского|каменской|тюменская|тюмени ской|тюмень ской|таманской|теме нской|йеменской|роменской|тюменские|тюменским
+ru	научитесь	на учитесь|научимтесь|научиться|начнитесь|научить|научились|науч весь|науч тест|случитесь|научилась|учитесь|научится|научись|научите|найдитесь
+ru	неуважение	не уважение|неуважения|неуважением|неуважении|неуважений|неуважению|неуваженье|нет уважение|уважение|не варение|несварение|неуважениям|неуважениях|неуваженьем|неуваженьи
+ru	идеальным	идеальный|идеальном|идеальные|идеальных|идеальны|идеальными|идеально|и реальным|реальным|идеал иным|идеальная|идеальной|идеальное|и идеальным|идеальную
+ru	изготавливать	изготавливают|изготавливали|и изготавливать|изготавливает|изготавливаться|изготавливал|изготавливаюсь|изготавливаясь|из отлавливать|изготавливав|изготавливаем|изготавливаете|изготавливаешь|изготавливай|изгои вливать
+ru	написано	написана|написаны|написан|написан о|записано|написало|на писано|напихано|неписано|написал|написал но|написать|написали|написала|написания
+ru	нашествие	нашествия|на шествие|нашествии|нашествием|нашествию|нашествий|наше ствие|наше твое|шествие|сошествие|нашествиям|нашествиях
+ru	мартынов	мартынова|мартинов|мартынове|мартыновы|мартенов|мартанов|мартынову|мартыном|мартонов|мартов|март снов|мартынов в|мартином|мартино|мартино в
+ru	программным	программных|программный|программные|программном|программны|программными|программы|программ иным|программное|программам|программно|программной|программная|прог рамным|программ умным
+ru	взлома	взлом|взлом а|взломал|взломай|взломе|взлому|взломан|взломам|взломах|излома|взломав|взломы|взломаю|в злом|вело а
+ru	механике	механики|механика|механик|механико|механику|меха нике|механизм|технике|меха пике|механиком|механизме|механиков|меха лике|механикою|механикой
+ru	образующие	образующих|образующий|образующим|образующее|о образующие|образующиеся|образующими|образующая|образующей|образ дующие|добра дующие
 en	problme	problem|prob me|problems|probe|probe me|proby me|probate|preble|problema|roble
 en	teh	the|th|ten|tea|eh|ted|te|tech|heh|tel|tee|tex|ter|tah|yeh
 en	recieve	receive|relieve|believe|received|receiver|receives|relieved|re ieee|retrieve|recipe|recipe ve|reeve|re iove|revive|deceive
@@ -83,30 +112,47 @@ en	fiel	feel|field|fuel|file|fill|fil|kiel|fief|fidel|fel|niel|biel|riel|ciel|pi
 en	ithink	i think|think|it think|thing|thank|within|thinks|it link|thin|thick|stink|itching|thine|chink|rethink
 en	thisis	this is|thesis|th isis|this|things|thinks|crisis|thirds|thighs|isis|twists|theses|thismia|hiss|thijs
 en	goodidea	good idea|goodies|goodie|goodie a|goodea|goodeidae
-en	blocv	block|bloc|bloch|blocs|black|blood|blow|lock|clock|blocks|blows|blown|blog|bloom|loch
-en	jahmie	jamie|jackie|jimmie|jaime|jasmine|jasmin|jaume|janie|jamia|sammie|jahre|mamie|jami|jame|jammin
-en	oinstint	in stint|on stint|instant|instinct|owns tint
-en	beauknt	be aunt|beaumont|beaut|beaune
-en	opinlion	opinion|open lion|spin lion|opinions|hopi lion|pinion|opilio|pillion
-en	cnano	nano|cano|cyano|can|cannot|piano|clan|chan|cannon|crane|canon|nato|chang|cane|cnn
-en	brid	bird|rid|bride|bid|grid|brad|arid|bred|brig|brit|bri|brim|bris|braid|brie
-en	admie	admit|admire|admin|addie|a dmie|dmie|amie|adie|die|eddie|advice|annie|dame|anime|jamie
-en	mierage	mirage|mier age|average|merge|migrate|peerage|mileage|menage|midrange|overage|vierge|mintage|mirages
-en	isabele	isabel|isabelle|isabela|isabell|is abele|isabella|i sable|sable|disable|usable|isbell|isobel|issele|i sabeel|sabeel
-en	intelectuals	intellectuals|intellectual|intellect pals|intellect gals
-en	hrad	had|head|hard|brad|rad|arad|trad|grad|hradi|wrad|has|red|road|dead|bad
-en	gmeli	gmelin|meli|gmel|gmel i|smell|mel|gaelic|mali|mei|amelia|melt|gel|eli|melo|smelt
-en	jjavana	java a|havana|javan|javan a|jacana|ravana|bhavana|jaana|kavana
-en	samtgmesidne	
-en	cuvrde	cure|curse|curve|curved|cured|currie|curie|curd|uvre|cuore|cuar de|curds|curr de|cuerda
-en	olooh	oooh|ooooh|look|old oh|blood|floor|solo oh|ooh|flood|loop|cloth|bloom|loch|olson|loot
-en	fololws	follows|follow|flows|fellows|fools|hollows|folles|fallows|fool los|solo los|fool laws
-en	umndnerstood	understood
-en	feras	fears|ferns|feral|eras|ferus|fieras|fers|geras|years|areas|texas|era|terms|fear|forms
-en	dxakota	dakota|lakota|doxa kota|dakotas|devkota
-en	discharyge	discharge|discharged|discharges|disc arge|dish arge|mischa rage
-en	celulr	cell|cells|cello|cellular|cellar|celle|cllr|cella|elul|cellule|celli|cellura
-en	conqstantly	constantly|constan try|constan tley|const antsy
-en	depts	depth|depths|debts|dept|depots|dents|septs|adepts|death|gets|kept|des|deputy|sets|tests
-en	scrborough	scarborough|scrub rough|serb rough|serbo rough|yarborough|harborough|narborough
-en	arrakiis	arrakis|arrakis is|araki is|area kiis
+en	oflows	flows|of lows|follows|flow|allows|blows|flown|flaws|hollows|slows|floss|lows|flops|glows|plows
+en	understoosd	understood|under stood|unders oost
+en	feawrs	fears|years|fear|ears|bears|tears|wears|hears|sears|gears|flaws|fairs|pears|feats|mears
+en	dakoat	dakota|dako at|dakar|lakota|dako|daulat|dacoit|hakoah|dakotas|dalat|zakat|daat|dakolo|rakyat|paksat
+en	fotd	food|ford|fold|fond|fod|foto|fot|for|not|got|good|found|both|old|four
+en	discqahrge	discharge|disc arge|disco arge
+en	celular	cellular|cellar|regular|collar|secular|cellars|ellar|cella|cuellar|cellura
+en	contsantyl	constantly|costs antal|counts antal|conta ntul
+en	arwaskis	arrakis|are skis|area skis|aria skis
+en	rhuin	ruin|rhein|rhin|run|rain|chain|robin|thin|chin|ruins|rhine|shin|chun|rhus in|erhu in
+en	diffrerded	differed|diff ended|diff eroded|diff herded
+en	sliulphur	sulphur
+en	confederatse	confederate|confederates|confederated|co federatie|confer erase|confide raise
+en	waitres	waitress|waiters|writers|waters|waited|writes|aires|waiter|wires|whites|waits|walters|waivers|litres|waite
+en	ervous	nervous|serious|errors|vous|envious|envoys|eros|erebus|ferrous|erdo us|servo us|servus|rous|evros|fervour
+en	furios	furious|furies|furioso|curios|furio|fruits|curious|fusion|fries|euros|juris|furs|gurion|burgos|rios
+en	sittzwg	sitting|sittang
+en	pashu	pasha|ashu|dashu|past|pass|cash|path|push|wash|ash|pas|nash|paths|paso|vash
+en	poetgry	poetry|pottery
+en	folye	foley|folie|foyle|polye|folke|force|role|fly|holy|hole|file|folk|folks|false|cole
+en	form	for|from|fort|farm|forms|firm|ford|worm|forum|fork|norm|foam|fore|dorm|torm
+en	than	that|then|th an|thank|thin|khan|chan|han|tan|thai|tha|shan|ethan|tian|phan
+en	wether	whether|weather|ether|wetter|wither|nether|tether|werther|gether|wetzer|aether|we the|we they|other|father
+en	cant	can|want|cat|cast|ant|cent|cart|cane|sant|capt|cunt|cans|canto|chant|pant
+en	tool	too|took|cool|fool|pool|tools|toll|wool|stool|tbol|kool|toole|toil|toot|toon
+en	marquette	arquette|marquetti|marquee|mariette|paquette|marinette|marquet|marqu bette|marqu este|marquense|marquetry|mark bette
+en	kicker	kicked|picker|kickers|ticker|wicker|bicker|ricker|dicker|kirker|killer|picked|kick|ticket|mickey|wicked
+en	scooped	stooped|swooped|scoped|scored|stopped|cooper|scope|cooked|cooled|scoop|scooter|scouted|scraped|schooled|spooked
+en	bellegarde	bell garde|belle garde|belle arde|bellemare
+en	echoing	ching|choking|chong|cooing|aching|etching|choong
+en	risked	asked|listed|raised|risk|missed|rise|picked|ranked|liked|linked|kicked|kissed|pissed|risks|rises
+en	ambroise	ambrose|amboise|am rose|am rise|amber oise|ambrosia|ambrosio
+en	sinbad	sindbad|simba|sinai|sinned|minbar|sinha|sina|sinan|sind|snead|siad|sansad|sibbald|sinyard|sinnar
+en	matador	mata or|matadors|mated or|matar|amador|mamadou|matano|mavado|manado|mirador|mataco|palador|natator|matadi|mogador
+en	especiales	especially|specials|especial|speciale|especies|espa ciales|espn ciales|especiais|spec males
+en	steinberg	stein berg|sternberg|stenberg|steenberg|steinburg|stem berg|step berg|steiner|weinberg|steinbeck|rstenberg|feinberg|sternburg|strindberg|sternbergi
+en	contribution	contributions|contributing|contribute on|contributor|contrition|contra button|conti button
+en	cccp	ccc|ccp|cccf|bccp|cccc|cup|camp|cop|crap|cap|chip|coup|crop|coop|cc
+en	calvados	salvador|cavazos|call ados|calm ados|casados
+en	curated	curate|curates|created|rated|charted|cheated|curved|crater|curator|cursed|cured|coated|crafted|crate|mutated
+en	fifty	fifth|nifty|city|gift|fit|dirty|lift|forty|fifa|pity|sixty|kitty|gifts|filthy|fits
+en	bleached	breached|beached|bleaches|bleacher|leached|reached|beaches|preached|bleach|blotched|breaches|blacked|bleachers|blew ched|plea ched
+en	westmount	west mount|westmont|west out|west count|westbound
+en	burley	barley|burnley|hurley|curley|purley|burney|turley|burly|birley|gurley|buried|turkey|survey|butler|burned

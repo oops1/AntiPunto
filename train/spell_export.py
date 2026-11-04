@@ -69,12 +69,15 @@ def write_fixture():
                "воригинае", "приветькак", "проверьналичие", "модлельвклчюить"],
         "en": ["problme", "teh", "recieve", "godo", "fiel", "ithink", "thisis", "goodidea"],
     }
+    # словарные слова: ошибка, совпавшая со словом; вариант с одной лишь ё — не кандидат
+    in_dict = {"ru": ["бела", "пне", "еще", "все", "была", "чт", "кога", "тоже", "ветке"], "en": ["form", "than", "wether", "cant"]}
     lines = []
     for lang, n in (("ru", 60), ("en", 30)):
         d = Dictionary(lang)
         words = fixed[lang] + [corrupt(w, lang, rng) for w in rng.sample(d.words[:20000], n)]
+        words = [w for w in words if w not in d.freq] + in_dict[lang] + rng.sample(d.words[:50000], 20)
         # «|» между кандидатами: в разбивках есть пробел
-        lines += [f"{lang}\t{w}\t{'|'.join(d.candidates(w))}" for w in words if w not in d.freq]
+        lines += [f"{lang}\t{w}\t{'|'.join(d.candidates(w))}" for w in words]
     out = Path(__file__).resolve().parent.parent / "client" / "tests" / "spell_candidates.tsv"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("фикстура кандидатов:", len(lines))

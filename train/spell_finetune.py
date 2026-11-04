@@ -4,6 +4,8 @@ python spell_finetune.py --init spell_v8.pt --out spell_v9.pt
 Учим на открытых парах (spell_open.py) и половине своей разметки (dev); отбираем шаг
 по отложенным 10 % открытых пар и синтетическому valid; отчёт — на второй половине
 разметки (held), которой модель не видела.
+--dict dict_train.npz: словарный режим — в батч подмешиваются группы со словарным набранным
+(ошибка, ставшая другим словом, или «оставить»), в настоящие — открытые пары «словарное».
 """
 
 import argparse
@@ -30,9 +32,12 @@ DATA = paths.ROOT / "spell"
 T = 0.75
 
 
-def group(d: Dictionary, known: Bloom, typed: str, target: str | None, ctx: str):
+def group(d: Dictionary, known: Bloom, typed: str, target: str | None, ctx: str, in_dict: bool = False):
     """Группа как в клиенте; None — клиент модель не спросит или верного ответа нет среди кандидатов."""
-    if typed in d.freq or typed in known:
+    if typed in d.freq:
+        if not in_dict:
+            return None
+    elif typed in known:
         return None
     cands = d.candidates(typed)
     if not cands:
@@ -44,7 +49,7 @@ def group(d: Dictionary, known: Bloom, typed: str, target: str | None, ctx: str)
             return None
         y = hits[0]
     rows = np.zeros((K, L), np.uint8)
-    rows[0] = row(ctx, typed, typed)
+    rows[0] = row(ctx, typed, typed, 0, 0, d.freq.get(typed, 0))
     for j, c in enumerate(cands, 1):
         rows[j] = row(ctx, typed, c, j, osa(typed, c), d.freq_of(c))
     mask = np.zeros(K, np.uint8)
@@ -52,14 +57,14 @@ def group(d: Dictionary, known: Bloom, typed: str, target: str | None, ctx: str)
     return rows, mask, y
 
 
-def open_cases(lang: str = "ru"):
+def open_cases(lang: str = "ru", want: str = "вне словаря"):
     name = "open_pairs.tsv" if lang == "ru" else "open_pairs_en.tsv"
     for line in (DATA / name).read_text(encoding="utf-8").split("\n")[1:]:
         parts = line.split("\t")
         if len(parts) != 6:
             continue
         w, t, ctx, _src, _kind, where = parts
-        if where == "вне словаря":
+        if where == want and len(w) >= 3 and (not t or len(t) >= 3):
             yield w, t or None, ctx
 
 
@@ -103,6 +108,9 @@ if __name__ == "__main__":
     ap.add_argument("--mine", type=int, default=1, help="во сколько раз повторить свои случаи")
     ap.add_argument("--keep-cap", type=int, default=10**9, help="не больше стольких открытых «оставить»")
     ap.add_argument("--en", type=int, default=0, help="сколько английских открытых пар добавить (0 — без английского)")
+    ap.add_argument("--dict", type=Path, help="словарные группы генератора (dict_train.npz)")
+    ap.add_argument("--dict-frac", type=float, default=0.4, help="доля словарных групп в батче")
+    ap.add_argument("--rw-en", type=int, default=6000, help="сколько английских открытых пар «словарное» добавить")
     a = ap.parse_args()
     dev = torch.device("cuda")
     torch.manual_seed(0)
@@ -118,8 +126,8 @@ if __name__ == "__main__":
     open_val = [c for c in opened if zlib.crc32(c[0].encode()) % 10 == 0]
     open_tr = [c for c in opened if zlib.crc32(c[0].encode()) % 10 != 0]
 
-    def build(cases, lang="ru"):
-        gs = [g for g in (group(dicts[lang], known, w, t, ctx) for w, t, ctx in cases) if g]
+    def build(cases, lang="ru", in_dict=False):
+        gs = [g for g in (group(dicts[lang], known, w, t, ctx, in_dict) for w, t, ctx in cases) if g]
         return tensors(gs, dev), (sum(1 for c in cases if c[1]), sum(1 for c in cases if not c[1]))
 
     keeps = [c for c in open_tr if not c[1]][: a.keep_cap]
@@ -138,6 +146,23 @@ if __name__ == "__main__":
         val_en, tot_en = build(en_val, "en")
         train_real = tuple(torch.cat([x, y]) for x, y in zip(train_real, en_train))
         print(f"английских групп {len(en_train[0])} («оставить» {(en_train[2] == 0).float().mean():.2f}), отбор по {len(val_en[0])}", flush=True)
+    rw = {}
+    if a.dict:
+        import random
+
+        dsynth, dvalid = load(a.dict.stem, dev), load(a.dict.stem.replace("train", "valid"), dev)
+        # отложенные словарные «оставить» синтетики: мера ложных правок на правильных словах
+        dkeep = tuple(t[dvalid[2] == 0] for t in dvalid)
+        for lang, cap in (("ru", 10**9), ("en", a.rw_en)):
+            cases = [c for c in open_cases(lang, "словарное") if c[1] and c[0].replace("ё", "е") != c[1].replace("ё", "е")]
+            random.Random(1).shuffle(cases)
+            val = [c for c in cases if zlib.crc32(c[0].encode()) % 10 == 0]
+            tr = [c for c in cases if zlib.crc32(c[0].encode()) % 10 != 0][:cap]
+            rw_tr, _ = build(tr, lang, True)
+            rw[lang] = build(val, lang, True)
+            train_real = tuple(torch.cat([x, y]) for x, y in zip(train_real, rw_tr))
+            print(f"словарные открытые {lang}: обучение {len(rw_tr[0])} (из {len(tr)}), отбор {len(rw[lang][0][0])}", flush=True)
+        print(f"словарные группы генератора {len(dsynth[0])} («оставить» {(dsynth[2] == 0).float().mean():.2f}), отложенных «оставить» {len(dkeep[0])}", flush=True)
     synth, valid = load("train", dev), load("valid", dev)
     print(
         f"настоящих групп для обучения {len(train_real[0])} (открытых {len(open_tr)}, своих {len(mine_dev)}), "
@@ -150,6 +175,7 @@ if __name__ == "__main__":
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.98), weight_decay=0.01)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: min(1.0, s / 100) * 0.5 * (1 + math.cos(math.pi * min(s, a.steps) / a.steps)))
     nr = max(1, int(a.bs * a.real))
+    nd = int(a.bs * a.dict_frac) if a.dict else 0
 
     def report(step):
         vl, vacc = evaluate(model, valid)
@@ -161,6 +187,15 @@ if __name__ == "__main__":
         )
         if a.en:
             print(f"    английские как клиент: {client_score(model, val_en, tot_en)}", flush=True)
+        if a.dict:
+            dl, dacc = evaluate(model, dvalid)
+            print(f"    словарные: синтетика {dl:.4f} {dacc:.4f}", flush=True)
+            for t in (0.9, 0.95, 0.98):
+                fp = client_score(model, dkeep, (1, len(dkeep[0])), t).split("испорчено ")[1]
+                line = f"    порог {t:.2f}: ложных правок {fp}"
+                for lang in rw:
+                    line += f" | {lang} {client_score(model, *rw[lang], t)}"
+                print(line, flush=True)
         if step == 0 or step == a.steps:
             for t in (0.6, 0.65, 0.7, 0.8):
                 line = f"    порог {t:.2f}: открытые {client_score(model, val_open, tot_open, t)} | свои held {client_score(model, held, tot_held, t)}"
@@ -173,10 +208,13 @@ if __name__ == "__main__":
     best = (base_open, 0)
     for step in range(1, a.steps + 1):
         ir = torch.randint(0, len(train_real[0]), (nr,), device=dev)
-        is_ = torch.randint(0, len(synth[0]), (a.bs - nr,), device=dev)
-        x = torch.cat([train_real[0][ir], synth[0][is_]])
-        m = torch.cat([train_real[1][ir], synth[1][is_]])
-        y = torch.cat([train_real[2][ir], synth[2][is_]])
+        is_ = torch.randint(0, len(synth[0]), (a.bs - nr - nd,), device=dev)
+        parts = [(train_real, ir), (synth, is_)]
+        if nd:
+            parts.append((dsynth, torch.randint(0, len(dsynth[0]), (nd,), device=dev)))
+        x = torch.cat([p[0][i] for p, i in parts])
+        m = torch.cat([p[1][i] for p, i in parts])
+        y = torch.cat([p[2][i] for p, i in parts])
         with torch.autocast("cuda", torch.bfloat16):
             z = logits(model, x, m)
         loss = F.cross_entropy(z, y)

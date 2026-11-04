@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering::SeqCst};
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
@@ -48,6 +49,8 @@ struct State {
     labels: Vec<RECT>,
     font: isize,
     bold: isize,
+    /// Мелкий шрифт подписи «Ctrl» у цифры.
+    small: isize,
     scale: f32,
 }
 
@@ -59,8 +62,10 @@ static STATE: Mutex<State> = Mutex::new(State {
     labels: Vec::new(),
     font: 0,
     bold: 0,
+    small: 0,
     scale: 1.0,
 });
+const BLUE: COLORREF = COLORREF(0x00C0_7820);
 
 fn post(msg: u32) {
     let h = HWND_.load(SeqCst);
@@ -198,6 +203,31 @@ fn text_size(dc: HDC, s: &str) -> SIZE {
     sz
 }
 
+/// Клавиша «Ctrl» перед цифрой: размер рамки; r = Some — нарисовать слева в ячейке.
+unsafe fn ctrl_key(dc: HDC, small: isize, scale: f32, r: Option<(i32, &RECT)>) -> SIZE {
+    unsafe {
+        let px = |v: f32| (v * scale).round() as i32;
+        let prev = SelectObject(dc, HGDIOBJ(small as *mut _));
+        let t = text_size(dc, "Ctrl");
+        let key = SIZE { cx: t.cx + px(8.0), cy: t.cy + px(2.0) };
+        if let Some((left, c)) = r {
+            let top = (c.top + c.bottom - key.cy) / 2;
+            let pen = CreatePen(PS_SOLID, 1, BLUE);
+            let old_pen = SelectObject(dc, pen.into());
+            let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+            let _ = RoundRect(dc, left, top, left + key.cx, top + key.cy, px(3.0), px(3.0));
+            SelectObject(dc, old_brush);
+            SelectObject(dc, old_pen);
+            let _ = DeleteObject(pen.into());
+            SetTextColor(dc, BLUE);
+            let mut kr = RECT { left, top, right: left + key.cx, bottom: top + key.cy };
+            DrawTextW(dc, &mut wide("Ctrl"), &mut kr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
+        }
+        SelectObject(dc, prev);
+        key
+    }
+}
+
 /// Разметить ячейки и поставить окно под курсор (или над ним у низа экрана).
 unsafe fn layout(hwnd: HWND) {
     unsafe {
@@ -208,14 +238,14 @@ unsafe fn layout(hwnd: HWND) {
         let _ = GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
         let k = dx as f32 / 96.0;
         let px = |v: f32| (v * k).round() as i32;
-        for f in [s.font, s.bold] {
+        for f in [s.font, s.bold, s.small] {
             if f != 0 {
                 let _ = DeleteObject(HGDIOBJ(f as *mut _));
             }
         }
-        let make = |weight: FONT_WEIGHT| {
+        let make = |weight: FONT_WEIGHT, size: f32| {
             CreateFontW(
-                -px(15.0),
+                -px(size),
                 0,
                 0,
                 0,
@@ -231,14 +261,16 @@ unsafe fn layout(hwnd: HWND) {
                 w!("Segoe UI"),
             )
         };
-        let font = make(FW_NORMAL);
+        let font = make(FW_NORMAL, 15.0);
         s.font = font.0 as isize;
-        s.bold = make(FW_BOLD).0 as isize;
+        s.bold = make(FW_BOLD, 15.0).0 as isize;
+        s.small = make(FW_NORMAL, 10.0).0 as isize;
         s.scale = k;
         let fonts = (s.font, s.bold);
         let dc = GetDC(Some(hwnd));
         let old = SelectObject(dc, font.into());
         let line_h = text_size(dc, "Ag").cy + px(10.0);
+        let key_w = ctrl_key(dc, s.small, k, None).cx + px(4.0);
         let label_w = s
             .rows
             .iter()
@@ -256,7 +288,7 @@ unsafe fn layout(hwnd: HWND) {
             for item in &r.items {
                 n += 1;
                 let iw = marked(dc, None, item, &diff(&r.word, item).1, &MARK_NEW, fonts);
-                let cw = text_size(dc, &n.to_string()).cx + px(7.0) + iw + px(20.0);
+                let cw = key_w + text_size(dc, &n.to_string()).cx + px(7.0) + iw + px(20.0);
                 cells.push(RECT { left: x, top, right: x + cw, bottom });
                 x += cw;
             }
@@ -311,8 +343,9 @@ unsafe fn paint(hwnd: HWND) {
                 n += 1;
                 let Some(c) = cells.next() else { break };
                 let num = n.to_string();
-                let mut cr = RECT { left: c.left + pad, ..*c };
-                SetTextColor(dc, COLORREF(0x00C0_7820));
+                let key = ctrl_key(dc, s.small, s.scale, Some((c.left + pad, c)));
+                let mut cr = RECT { left: c.left + pad + key.cx + (4.0 * s.scale).round() as i32, ..*c };
+                SetTextColor(dc, BLUE);
                 DrawTextW(dc, &mut wide(&num), &mut cr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
                 cr.left += text_size(dc, &num).cx + gap;
                 marked(dc, Some(&cr), item, &diff(&r.word, item).1, &MARK_NEW, fonts);
@@ -362,6 +395,30 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+/// `--popup-demo`: окно с образцом строк у курсора мыши на 6 с — проверка отрисовки без хука.
+pub fn demo() {
+    unsafe {
+        create(GetModuleHandleW(None).unwrap_or_default().into());
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let row =
+            |w: &str, items: &[&str]| Row { word: w.into(), items: items.iter().map(|s| s.to_string()).collect() };
+        show(
+            vec![row("пливет", &["привет", "плывет"]), row("сесии", &["сессии", "серии", "сесии"])],
+            RECT { left: pt.x, top: pt.y, right: pt.x, bottom: pt.y + 20 },
+        );
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        let mut msg = MSG::default();
+        while std::time::Instant::now() < end {
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
 }

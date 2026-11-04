@@ -59,7 +59,7 @@ fn config() -> (Config, Option<String>) {
         update_check: true,
         expect: None,
         spell: true,
-        spell_threshold: 0.75,
+        spell_threshold: 0.70,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);
@@ -78,6 +78,10 @@ fn config() -> (Config, Option<String>) {
                 c.spell_threshold = args.next().and_then(|v| v.parse().ok()).unwrap_or(c.spell_threshold)
             }
             "--spelltest" => selftest = args.next().map(|t| format!("\u{2}{t}")),
+            "--popup-demo" => {
+                popup::demo();
+                std::process::exit(0);
+            }
             "--version" => {
                 println!("AntiPunto {}", update::VERSION);
                 std::process::exit(0);

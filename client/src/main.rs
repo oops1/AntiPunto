@@ -10,9 +10,11 @@ mod lists;
 mod memory;
 mod ov;
 mod popup;
+mod prefs;
 mod settings;
 mod spell;
 mod stats;
+mod theme;
 mod tray;
 mod update;
 mod worker;
@@ -85,7 +87,24 @@ fn config() -> (Config, Option<String>) {
             }
             "--spelltest" => selftest = args.next().map(|t| format!("\u{2}{t}")),
             "--popup-demo" => {
+                settings::load();
+                match args.next().as_deref() {
+                    Some("dark") => settings::THEME.store(theme::DARK, std::sync::atomic::Ordering::SeqCst),
+                    Some("light") => settings::THEME.store(theme::LIGHT, std::sync::atomic::Ordering::SeqCst),
+                    _ => {}
+                }
                 popup::demo();
+                std::process::exit(0);
+            }
+            "--settings" => {
+                let rest: Vec<String> = args.collect();
+                let page = rest.iter().find_map(|a| a.parse().ok()).unwrap_or(0);
+                let theme = rest.iter().find_map(|a| match a.as_str() {
+                    "dark" => Some(theme::DARK),
+                    "light" => Some(theme::LIGHT),
+                    _ => None,
+                });
+                prefs::run(page, rest.iter().any(|a| a == "quiet"), theme);
                 std::process::exit(0);
             }
             "--version" => {

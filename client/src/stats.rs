@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-fn dir() -> std::path::PathBuf {
+pub fn dir() -> std::path::PathBuf {
     std::env::var_os("APPDATA").map(std::path::PathBuf::from).unwrap_or_default().join("AntiPunto")
 }
 
@@ -26,7 +26,7 @@ pub struct Saver {
     at: Instant,
 }
 
-const FILE: &str = "stats.txt";
+pub const FILE: &str = "stats.txt";
 
 impl Stats {
     pub fn load() -> Stats {
@@ -76,6 +76,13 @@ impl Stats {
 impl Saver {
     pub fn new(s: &Stats) -> Saver {
         Saver { saved: s.clone(), at: Instant::now() }
+    }
+
+    /// Записать сейчас: окно настроек ждёт свежие числа.
+    pub fn force(&mut self, s: &Stats) {
+        s.save();
+        self.saved = s.clone();
+        self.at = Instant::now();
     }
 
     /// Записать на диск не чаще раза в 30 с и только при изменениях.

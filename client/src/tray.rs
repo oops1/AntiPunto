@@ -33,6 +33,18 @@ const ID_LIST_FORCE: usize = 8;
 const ID_EXIT: usize = 9;
 const ID_SPELL: usize = 10;
 const ID_SUGGEST: usize = 11;
+const ID_SETTINGS: usize = 12;
+
+pub const CLASS: PCWSTR = w!("AntiPunto_tray");
+/// Команды окна настроек (wParam сообщения `ctl_msg`).
+pub const CTL_RELOAD: usize = 1;
+pub const CTL_FLUSH: usize = 2;
+pub const CTL_RESET: usize = 3;
+
+/// Сообщение, которым окно настроек говорит с резидентом.
+pub fn ctl_msg() -> u32 {
+    unsafe { RegisterWindowMessageW(w!("AntiPunto_ctl")) }
+}
 
 pub static READY: AtomicBool = AtomicBool::new(false);
 pub static STATUS: Mutex<String> = Mutex::new(String::new());
@@ -47,6 +59,7 @@ thread_local! {
     static ICONS: Cell<[HICON; 3]> = const { Cell::new([HICON(std::ptr::null_mut()); 3]) };
     static SHOWN: Cell<usize> = const { Cell::new(usize::MAX) };
     static TASKBAR_CREATED: Cell<u32> = const { Cell::new(0) };
+    static CTL: Cell<u32> = const { Cell::new(0) };
 }
 
 pub fn set_status(s: String) {
@@ -218,6 +231,7 @@ fn menu(hwnd: HWND) {
         }
         let auto = if autostart::enabled() { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(m, MF_STRING | auto, ID_AUTOSTART, w!("Запускать при входе в Windows"));
+        let _ = AppendMenuW(m, MF_STRING, ID_SETTINGS, w!("Настройки и статистика…"));
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, None);
         let avail = update::AVAILABLE.lock().unwrap().as_ref().map(|r| r.version.clone());
         let label: Vec<u16> = match &avail {
@@ -253,6 +267,29 @@ fn open_list(name: &str) {
             // нет ассоциации для .txt — явный Блокнот
             ShellExecuteW(None, w!("open"), w!("notepad.exe"), &path, &dir, SW_SHOWNORMAL);
         }
+    }
+}
+
+/// Окно настроек — отдельный запуск этой же программы.
+fn open_settings() {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg("--settings").spawn();
+    }
+}
+
+/// Команда от окна настроек.
+fn control(hwnd: HWND, what: usize) {
+    match what {
+        CTL_RELOAD => {
+            settings::load();
+            refresh(hwnd, true);
+        }
+        CTL_FLUSH | CTL_RESET => {
+            if let Some(tx) = SENDER.get() {
+                let _ = tx.send(if what == CTL_FLUSH { Event::Flush } else { Event::ResetStats });
+            }
+        }
+        _ => {}
     }
 }
 
@@ -301,6 +338,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     ID_LIST_PROGRAMS => open_list(lists::PROGRAMS),
                     ID_LIST_IGNORE => open_list(lists::IGNORE),
                     ID_LIST_FORCE => open_list(lists::FORCE),
+                    ID_SETTINGS => open_settings(),
                     ID_EXIT => {
                         let _ = DestroyWindow(hwnd);
                     }
@@ -322,6 +360,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 refresh(hwnd, true);
                 LRESULT(0)
             }
+            m if m != 0 && m == CTL.get() => {
+                control(hwnd, wp.0);
+                LRESULT(0)
+            }
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
     }
@@ -340,7 +382,7 @@ pub fn run(auto_update_check: bool) {
     }
     unsafe {
         let hinst = GetModuleHandleW(None).unwrap_or_default();
-        let class = w!("AntiPunto_tray");
+        let class = CLASS;
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinst.into(),
@@ -367,6 +409,7 @@ pub fn run(auto_update_check: bool) {
         MAIN_HWND.store(hwnd.0 as isize, SeqCst);
         popup::create(hinst.into());
         TASKBAR_CREATED.set(RegisterWindowMessageW(w!("TaskbarCreated")));
+        CTL.set(ctl_msg());
 
         let size = GetSystemMetricsForDpi(SM_CXSMICON, GetDpiForSystem());
         ICONS.set([load_icon(ICO_RU, size), load_icon(ICO_EN, size), load_icon(ICO_OFF, size)]);

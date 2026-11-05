@@ -4,6 +4,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering::SeqCst};
 
 use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Graphics::Dwm::{
+    DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUNDSMALL, DwmSetWindowAttribute,
+};
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -11,6 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::w;
 
 use crate::hook::{Event, SENDER};
+use crate::theme;
 
 /// Вариантов на слово и слов в окне: всего не больше 9 цифр.
 pub const PER_ROW: usize = 3;
@@ -24,13 +28,10 @@ const WM_HIDE: u32 = WM_APP + 11;
 const TIMEOUT_MS: u32 = 120_000;
 
 static HWND_: AtomicIsize = AtomicIsize::new(0);
+/// Углы и рамку рисует система (Windows 11): с ними приходит мягкая тень.
+static ROUNDED: AtomicBool = AtomicBool::new(false);
 
 const ZERO: RECT = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-// COLORREF — 0x00BBGGRR
-const INK: COLORREF = COLORREF(0x0020_2020);
-const GREY: COLORREF = COLORREF(0x0070_7070);
-const RED: COLORREF = COLORREF(0x0000_00DC);
-const GREEN: COLORREF = COLORREF(0x0028_9600);
 
 /// Строка окна: набранное слово и варианты замены.
 pub struct Row {
@@ -65,7 +66,6 @@ static STATE: Mutex<State> = Mutex::new(State {
     small: 0,
     scale: 1.0,
 });
-const BLUE: COLORREF = COLORREF(0x00C0_7820);
 
 fn post(msg: u32) {
     let h = HWND_.load(SeqCst);
@@ -150,8 +150,17 @@ struct Mark {
     ink: COLORREF,
 }
 
-const MARK_NEW: Mark = Mark { plain: INK, ink: GREEN };
-const MARK_BAD: Mark = Mark { plain: GREY, ink: RED };
+/// Новые буквы варианта.
+fn mark_new() -> Mark {
+    let p = theme::palette();
+    Mark { plain: p.ink, ink: p.green }
+}
+
+/// Лишние буквы набранного.
+fn mark_bad() -> Mark {
+    let p = theme::palette();
+    Mark { plain: p.grey, ink: p.red }
+}
 
 /// Текст отрезками: отмеченные буквы жирным цветом. r = None — только ширина.
 unsafe fn marked(dc: HDC, r: Option<&RECT>, text: &str, marks: &[bool], m: &Mark, fonts: (isize, isize)) -> i32 {
@@ -212,14 +221,15 @@ unsafe fn ctrl_key(dc: HDC, small: isize, scale: f32, r: Option<(i32, &RECT)>) -
         let key = SIZE { cx: t.cx + px(8.0), cy: t.cy + px(2.0) };
         if let Some((left, c)) = r {
             let top = (c.top + c.bottom - key.cy) / 2;
-            let pen = CreatePen(PS_SOLID, 1, BLUE);
+            let blue = theme::palette().blue;
+            let pen = CreatePen(PS_SOLID, 1, blue);
             let old_pen = SelectObject(dc, pen.into());
             let old_brush = SelectObject(dc, GetStockObject(NULL_BRUSH));
             let _ = RoundRect(dc, left, top, left + key.cx, top + key.cy, px(3.0), px(3.0));
             SelectObject(dc, old_brush);
             SelectObject(dc, old_pen);
             let _ = DeleteObject(pen.into());
-            SetTextColor(dc, BLUE);
+            SetTextColor(dc, blue);
             let mut kr = RECT { left, top, right: left + key.cx, bottom: top + key.cy };
             DrawTextW(dc, &mut wide("Ctrl"), &mut kr, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_NOPREFIX);
         }
@@ -274,7 +284,7 @@ unsafe fn layout(hwnd: HWND) {
         let label_w = s
             .rows
             .iter()
-            .map(|r| marked(dc, None, &format!("{} →", r.word), &suspicious(r), &MARK_BAD, fonts))
+            .map(|r| marked(dc, None, &format!("{} →", r.word), &suspicious(r), &mark_bad(), fonts))
             .max()
             .unwrap_or(0)
             + px(20.0);
@@ -287,7 +297,7 @@ unsafe fn layout(hwnd: HWND) {
             let mut x = label_w;
             for item in &r.items {
                 n += 1;
-                let iw = marked(dc, None, item, &diff(&r.word, item).1, &MARK_NEW, fonts);
+                let iw = marked(dc, None, item, &diff(&r.word, item).1, &mark_new(), fonts);
                 let cw = key_w + text_size(dc, &n.to_string()).cx + px(7.0) + iw + px(20.0);
                 cells.push(RECT { left: x, top, right: x + cw, bottom });
                 x += cw;
@@ -310,6 +320,11 @@ unsafe fn layout(hwnd: HWND) {
         }
         top = top.max(work.top);
         s.rect = RECT { left, top, right: left + w, bottom: top + h };
+        if ROUNDED.load(SeqCst) {
+            // рамка системы — в цвет темы
+            let c = theme::palette().frame;
+            let _ = DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, (&raw const c).cast(), 4);
+        }
         let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), left, top, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         let _ = InvalidateRect(Some(hwnd), None, true);
     }
@@ -322,9 +337,10 @@ unsafe fn paint(hwnd: HWND) {
         let dc = BeginPaint(hwnd, &mut ps);
         let mut rc = RECT::default();
         let _ = GetClientRect(hwnd, &mut rc);
-        let bg = CreateSolidBrush(COLORREF(0x00FA_FAFA));
-        let line = CreateSolidBrush(COLORREF(0x00C8_C8C8));
-        let frame = CreateSolidBrush(COLORREF(0x00A0_A0A0));
+        let pal = theme::palette();
+        let bg = CreateSolidBrush(pal.bg);
+        let line = CreateSolidBrush(pal.line);
+        let frame = CreateSolidBrush(pal.frame);
         FillRect(dc, &rc, bg);
         let old = SelectObject(dc, HGDIOBJ(s.font as *mut _));
         SetBkMode(dc, TRANSPARENT);
@@ -338,20 +354,22 @@ unsafe fn paint(hwnd: HWND) {
             }
             let fonts = (s.font, s.bold);
             let lr = RECT { left: lab.left + pad, ..*lab };
-            marked(dc, Some(&lr), &format!("{} →", r.word), &suspicious(r), &MARK_BAD, fonts);
+            marked(dc, Some(&lr), &format!("{} →", r.word), &suspicious(r), &mark_bad(), fonts);
             for item in &r.items {
                 n += 1;
                 let Some(c) = cells.next() else { break };
                 let num = n.to_string();
                 let key = ctrl_key(dc, s.small, s.scale, Some((c.left + pad, c)));
                 let mut cr = RECT { left: c.left + pad + key.cx + (4.0 * s.scale).round() as i32, ..*c };
-                SetTextColor(dc, BLUE);
+                SetTextColor(dc, pal.blue);
                 DrawTextW(dc, &mut wide(&num), &mut cr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
                 cr.left += text_size(dc, &num).cx + gap;
-                marked(dc, Some(&cr), item, &diff(&r.word, item).1, &MARK_NEW, fonts);
+                marked(dc, Some(&cr), item, &diff(&r.word, item).1, &mark_new(), fonts);
             }
         }
-        FrameRect(dc, &rc, frame);
+        if !ROUNDED.load(SeqCst) {
+            FrameRect(dc, &rc, frame);
+        }
         SelectObject(dc, old);
         for b in [bg, line, frame] {
             let _ = DeleteObject(b.into());
@@ -432,6 +450,7 @@ pub fn create(hinst: HINSTANCE) {
             hInstance: hinst,
             lpszClassName: class,
             hCursor: LoadCursorW(None, IDC_HAND).unwrap_or_default(),
+            style: CS_DROPSHADOW,
             ..Default::default()
         };
         RegisterClassW(&wc);
@@ -449,6 +468,10 @@ pub fn create(hinst: HINSTANCE) {
             Some(hinst),
             None,
         ) {
+            let round = DWMWCP_ROUNDSMALL;
+            let ok = DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, (&raw const round).cast(), 4).is_ok();
+            // до Windows 11 остаётся классическая тень класса окна
+            ROUNDED.store(ok, SeqCst);
             HWND_.store(h.0 as isize, SeqCst);
         }
     }

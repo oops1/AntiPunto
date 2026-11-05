@@ -55,6 +55,10 @@ pub enum Event {
     Mouse,
     /// Клик по варианту в окне у курсора.
     Pick(usize),
+    /// Окно настроек просит записать счётчики.
+    Flush,
+    /// Обнулить счётчики.
+    ResetStats,
 }
 
 pub fn is_modifier(vk: u16) -> bool {

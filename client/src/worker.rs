@@ -18,7 +18,7 @@ use crate::engine::{Buffer, Ch, Plan};
 use crate::focus::Focus;
 use crate::hook::{CORRECTING, Event, HAS_WORD, Key, UNDO_READY, is_modifier};
 use crate::keymap::{KEYMAP, OTHER, SPACE};
-use crate::lists::{self, Lists};
+use crate::lists::{self, Lists, Mode};
 use crate::memory::Memory;
 use crate::ov::Model;
 use crate::popup;
@@ -93,6 +93,8 @@ struct Worker {
     hwnd: isize,
     proc_name: String,
     excluded: bool,
+    /// В этой программе правим только раскладку.
+    layout_only: bool,
     target_lay: Option<u8>,
     undo: Option<Undo>,
     stats: Stats,
@@ -194,6 +196,7 @@ impl Worker {
                 return;
             }
             Event::Key(k) => k,
+            Event::Flush | Event::ResetStats => return,
         };
         if is_modifier(k.vk) {
             if self.modifier(&k) && !self.excluded {
@@ -218,7 +221,9 @@ impl Worker {
             self.proc_name = process_name(k.hwnd);
             *LAST_APP.lock().unwrap() = self.proc_name.clone();
         }
-        self.excluded = self.cfg.exclude.contains(&self.proc_name) || self.lists.programs.contains(&self.proc_name);
+        let mode = self.lists.programs.get(&self.proc_name).copied();
+        self.excluded = self.cfg.exclude.contains(&self.proc_name) || mode == Some(Mode::Off);
+        self.layout_only = mode == Some(Mode::Layout);
         if k.deferred {
             self.replay(k, rx, pending);
         } else {
@@ -299,6 +304,9 @@ impl Worker {
     fn spell_check(&mut self, plan: Option<&Plan>) -> Option<Checked> {
         if !settings::SPELL.load(SeqCst) {
             self.speller = None; // выключили — освободить память
+            return None;
+        }
+        if self.layout_only {
             return None;
         }
         self.ensure_speller();
@@ -691,6 +699,7 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         hwnd: 0,
         proc_name: String::new(),
         excluded: false,
+        layout_only: false,
         target_lay: None,
         undo: None,
         stats,
@@ -710,7 +719,14 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
                 Err(_) => return,
             },
         };
-        w.handle(ev, &rx, &mut pending);
+        match ev {
+            Event::Flush => saver.force(&w.stats),
+            Event::ResetStats => {
+                w.stats = Stats::default();
+                saver.force(&w.stats);
+            }
+            ev => w.handle(ev, &rx, &mut pending),
+        }
         if w.sync_offers() {
             w.show_offers();
         }

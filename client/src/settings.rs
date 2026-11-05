@@ -1,6 +1,6 @@
-//! Настройки из меню трея: HKCU\Software\AntiPunto.
+//! Настройки из меню трея и окна настроек: HKCU\Software\AntiPunto.
 
-use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::SeqCst};
 
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, REG_DWORD, RRF_RT_REG_DWORD, RegGetValueW, RegSetKeyValueW};
 use windows::core::{PCWSTR, w};
@@ -11,6 +11,8 @@ const KEY: PCWSTR = w!("Software\\AntiPunto");
 pub static SPELL: AtomicBool = AtomicBool::new(true);
 /// Показывать варианты у курсора, когда модель сомневается.
 pub static SUGGEST: AtomicBool = AtomicBool::new(true);
+/// Тема окон: 0 — как в Windows, 1 — светлая, 2 — тёмная.
+pub static THEME: AtomicU32 = AtomicU32::new(0);
 
 fn get(name: PCWSTR) -> Option<u32> {
     let mut v = 0u32;
@@ -31,6 +33,7 @@ fn put(name: PCWSTR, v: u32) {
 pub fn load() {
     SPELL.store(get(w!("Spell")) != Some(0), SeqCst);
     SUGGEST.store(get(w!("Suggest")) != Some(0), SeqCst);
+    THEME.store(get(w!("Theme")).unwrap_or(0).min(2), SeqCst);
 }
 
 pub fn set_spell(on: bool) {
@@ -41,6 +44,11 @@ pub fn set_spell(on: bool) {
 pub fn set_suggest(on: bool) {
     SUGGEST.store(on, SeqCst);
     put(w!("Suggest"), on as u32);
+}
+
+pub fn set_theme(v: u32) {
+    THEME.store(v, SeqCst);
+    put(w!("Theme"), v);
 }
 
 #[cfg(test)]

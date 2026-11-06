@@ -18,14 +18,15 @@ use crate::engine::{Buffer, Ch, Plan};
 use crate::focus::Focus;
 use crate::hook::{CORRECTING, Event, HAS_WORD, Key, UNDO_READY, is_modifier};
 use crate::keymap::{KEYMAP, OTHER, SPACE};
-use crate::lists::{self, Lists};
+use crate::lists::{self, Lists, Mode};
+use crate::lm::Lm;
 use crate::memory::Memory;
 use crate::ov::Model;
 use crate::popup;
 use crate::spell::Speller;
 use crate::stats::{Saver, Stats};
 use crate::tray::{READY, fence, set_status};
-use crate::{Config, input, load_model, load_speller, settings};
+use crate::{Config, input, lmstore, load_lm, load_model, load_speller, settings};
 
 #[derive(Default)]
 struct Mods {
@@ -53,13 +54,24 @@ const OFFER_MIN_P: f32 = 0.05;
 /// Для словарного слова варианты показываем только заметные.
 const OFFER_DICT_MIN_P: f32 = 0.8;
 
-/// Результат орфографии для последнего слова: границы в буфере и варианты.
+/// Результат орфографии для слова: границы в буфере и варианты.
 struct Checked {
     a: usize,
     b: usize,
     word: String,
     ranked: Vec<(String, f32)>,
     in_dict: bool,
+    /// Оценки с языковой моделью: порог другой.
+    lm: bool,
+    ru: bool,
+}
+
+/// Слово, оставленное на своей границе: языковая модель проверит его ещё раз по следующему слову.
+struct Recheck {
+    a: usize,
+    b: usize,
+    word: String,
+    ru: bool,
 }
 
 /// Варианты для слова a..b в буфере; text — что там сейчас на экране.
@@ -93,6 +105,8 @@ struct Worker {
     hwnd: isize,
     proc_name: String,
     excluded: bool,
+    /// В этой программе правим только раскладку.
+    layout_only: bool,
     target_lay: Option<u8>,
     undo: Option<Undo>,
     stats: Stats,
@@ -103,6 +117,14 @@ struct Worker {
     speller_failed: bool,
     /// Сомнительные слова фразы: окно у курсора держится до конца фразы.
     offers: Vec<Offer>,
+    recheck: Option<Recheck>,
+    /// Языковая модель грузится в фоне: сборка для NPU занимает десятки секунд.
+    lm_loading: Option<Receiver<Result<Lm, String>>>,
+    lm_failed: bool,
+    /// Файлы модели удаляют или заменяют: не грузить до следующей команды.
+    lm_hold: bool,
+    /// Строка состояния без приписки о языковой модели.
+    status: String,
 }
 
 /// Программа, где печатали последней: для пункта меню «не исправлять здесь».
@@ -194,6 +216,7 @@ impl Worker {
                 return;
             }
             Event::Key(k) => k,
+            Event::Flush | Event::ResetStats | Event::Models | Event::LmUnload | Event::LmReady => return,
         };
         if is_modifier(k.vk) {
             if self.modifier(&k) && !self.excluded {
@@ -218,7 +241,9 @@ impl Worker {
             self.proc_name = process_name(k.hwnd);
             *LAST_APP.lock().unwrap() = self.proc_name.clone();
         }
-        self.excluded = self.cfg.exclude.contains(&self.proc_name) || self.lists.programs.contains(&self.proc_name);
+        let mode = self.lists.programs.get(&self.proc_name).copied();
+        self.excluded = self.cfg.exclude.contains(&self.proc_name) || mode == Some(Mode::Off);
+        self.layout_only = mode == Some(Mode::Layout);
         if k.deferred {
             self.replay(k, rx, pending);
         } else {
@@ -295,13 +320,78 @@ impl Worker {
         }
     }
 
+    /// Языковая модель: подключить, когда готова; отпустить, когда выключена или удаляется.
+    fn ensure_lm(&mut self) {
+        let Some(sp) = self.speller.as_mut() else { return };
+        if !settings::LM.load(SeqCst) || self.lm_hold {
+            if sp.lm.take().is_some() {
+                set_status(self.status.clone());
+                if self.cfg.debug {
+                    println!("языковая модель выгружена");
+                }
+            }
+            // загрузку не бросаем: вторая параллельная не нужна; готовую, но лишнюю — выгрузить
+            if let Some(rx) = &self.lm_loading
+                && !matches!(rx.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty))
+            {
+                self.lm_loading = None;
+            }
+            return;
+        }
+        if sp.lm.is_some() {
+            return;
+        }
+        if let Some(rx) = &self.lm_loading {
+            let got = match rx.try_recv() {
+                Ok(r) => r,
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(_) => Err("загрузка прервана".to_string()),
+            };
+            self.lm_loading = None;
+            match got {
+                Ok(lm) => {
+                    set_status(format!("{}; языковая модель на {}", self.status, lm.device));
+                    if self.cfg.debug {
+                        println!("языковая модель на {}", lm.device);
+                    }
+                    sp.lm = Some(lm);
+                }
+                Err(e) => {
+                    self.lm_failed = true;
+                    set_status(format!("{}; языковая модель не загружена: {e}", self.status));
+                    if self.cfg.debug {
+                        println!("языковая модель не загружена: {e}");
+                    }
+                }
+            }
+            return;
+        }
+        if self.lm_failed || !lmstore::installed(&self.cfg.lm_dir) {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cfg = self.cfg.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(load_lm(&cfg));
+            // подключить сразу, не дожидаясь следующего слова
+            if let Some(ev) = crate::hook::SENDER.get() {
+                let _ = ev.send(Event::LmReady);
+            }
+        });
+        self.lm_loading = Some(rx);
+    }
+
     /// Орфография последнего слова с учётом правки раскладки: все варианты модели.
     fn spell_check(&mut self, plan: Option<&Plan>) -> Option<Checked> {
         if !settings::SPELL.load(SeqCst) {
             self.speller = None; // выключили — освободить память
             return None;
         }
+        if self.layout_only {
+            return None;
+        }
         self.ensure_speller();
+        self.ensure_lm();
         let sp = self.speller.as_mut()?;
         let mut sim = self.buf.clone();
         if let Some(p) = plan {
@@ -314,12 +404,72 @@ impl Worker {
         if self.memory.safe(&word) && sp.dict(ru).contains(&word) {
             return None;
         }
-        let r = sp.rank(&ctx, &word, ru).ok()??;
+        let r = match sp.rank(&ctx, &word, "", ru) {
+            Ok(r) => r?,
+            Err(e) => {
+                if self.cfg.debug {
+                    println!("  орфография: ошибка — {e}");
+                }
+                return None;
+            }
+        };
         if self.cfg.debug {
             let top: Vec<String> = r.items.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
-            println!("  орфография: «{word}»{} {}", if r.in_dict { " (словарное)" } else { "" }, top.join(" "));
+            let tag = match (r.in_dict, r.lm) {
+                (true, true) => " (словарное, с языковой моделью)",
+                (true, false) => " (словарное)",
+                (false, true) => " (с языковой моделью)",
+                (false, false) => "",
+            };
+            println!("  орфография: «{word}»{tag} {}", top.join(" "));
         }
-        Some(Checked { a, b, word, ranked: r.items, in_dict: r.in_dict })
+        Some(Checked { a, b, word, ranked: r.items, in_dict: r.in_dict, lm: r.lm, ru })
+    }
+
+    /// Предыдущее слово ещё раз, теперь с текстом справа: его видит только языковая модель.
+    /// sim — буфер после правок этого шага.
+    fn spell_recheck(&mut self, sim: &Buffer) -> Option<Checked> {
+        let r = self.recheck.take()?;
+        if self.layout_only {
+            return None;
+        }
+        let sp = self.speller.as_mut()?;
+        if sp.lm.is_none() || !r.ru {
+            return None;
+        }
+        if r.b >= sim.chars.len() || sim.chars[r.a..r.b].iter().map(Ch::render).collect::<String>() != r.word {
+            return None;
+        }
+        let ctx: String = sim.chars[..r.a].iter().map(Ch::render).collect();
+        let right: String = sim.chars[r.b..].iter().map(Ch::render).collect();
+        if right.trim().is_empty() {
+            return None;
+        }
+        let ranked = sp.rank(&ctx, &r.word, &right, r.ru).ok()??;
+        if self.cfg.debug {
+            let top: Vec<String> = ranked.items.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
+            println!("  перепроверка «{}» + «{}»: {}", r.word, right.trim_end(), top.join(" "));
+        }
+        if !ranked.lm {
+            return None;
+        }
+        Some(Checked {
+            a: r.a,
+            b: r.b,
+            word: r.word,
+            ranked: ranked.items,
+            in_dict: ranked.in_dict,
+            lm: true,
+            ru: r.ru,
+        })
+    }
+
+    /// Правка словом другой длины: сдвинуть строки вариантов правее неё.
+    fn shift_offers(&mut self, from: usize, delta: isize) {
+        for x in self.offers.iter_mut().filter(|x| x.a >= from) {
+            x.a = (x.a as isize + delta) as usize;
+            x.b = (x.b as isize + delta) as usize;
+        }
     }
 
     /// Варианты для окна у курсора; fixed — лучший уже подставлен.
@@ -428,10 +578,7 @@ impl Worker {
                     println!("вариант {}: «{}» → «{word}»", i + 1, o.text);
                 }
                 let delta = self.buf.chars.len() as isize - before.chars.len() as isize;
-                for x in self.offers.iter_mut().filter(|x| x.a > o.a) {
-                    x.a = (x.a as isize + delta) as usize;
-                    x.b = (x.b as isize + delta) as usize;
-                }
+                self.shift_offers(o.a + 1, delta);
                 self.undo =
                     Some(Undo { before: before.clone(), text, old, old_lay: before.chars[o.a].lay, word: None });
                 UNDO_READY.store(true, SeqCst);
@@ -545,24 +692,50 @@ impl Worker {
             }
         };
         let checked = self.spell_check(plan.as_ref());
-        let spell = checked.as_ref().and_then(|c| {
-            let thr = self.speller.as_ref().map_or(f32::INFINITY, |s| s.threshold_for(c.in_dict));
+        let fix_of = |c: &Checked, thr: f32| {
             let (w, p) = &c.ranked[0];
             (*w != c.word && *p >= thr).then(|| (c.a, c.b, w.clone(), *p))
-        });
+        };
+        let thr_for =
+            |sp: &Option<Speller>, c: &Checked| sp.as_ref().map_or(f32::INFINITY, |s| s.threshold_for(c.in_dict, c.lm));
+        let spell = checked.as_ref().and_then(|c| fix_of(c, thr_for(&self.speller, c)));
         let dict_word = checked.as_ref().filter(|c| c.in_dict).map(|c| c.word.clone());
         if let Some(w) = &dict_word
             && spell.is_none()
         {
             self.memory.hit(w, 1);
         }
+        // предыдущее слово с текстом справа — на буфере, каким он станет после правок этого шага
+        let late = {
+            let mut sim = self.buf.clone();
+            if let Some(p) = &plan {
+                sim.apply(p.clone());
+            }
+            if let Some((a, b, new, _)) = &spell {
+                sim.replace_word(*a, *b, new);
+            }
+            self.spell_recheck(&sim)
+        };
+        let late_fix = late.as_ref().and_then(|c| fix_of(c, thr_for(&self.speller, c)));
+        let late_word = late.as_ref().filter(|c| c.in_dict).map(|c| c.word.clone());
+        // оставленное слово проверим ещё раз после следующего
+        self.recheck = match &checked {
+            Some(c) if spell.is_none() => Some(Recheck { a: c.a, b: c.b, word: c.word.clone(), ru: c.ru }),
+            _ => None,
+        };
         // слово после автоправки могло стать длиннее
-        let offer = checked.filter(|_| offer_ok).map(|c| {
+        let mut offer = checked.filter(|_| offer_ok).map(|c| {
             let b = spell.as_ref().map_or(c.b, |s| c.a + s.2.chars().count());
             (c.a, b, Self::offer_items(&c, spell.is_some()))
         });
-        if plan.is_none() && spell.is_none() {
-            if let Some((a, b, items)) = offer {
+        // варианты предыдущего слова: прежняя строка устарела
+        if let Some(c) = &late {
+            self.offers.retain(|o| o.a != c.a);
+        }
+        let late_offer =
+            late.filter(|_| offer_ok && late_fix.is_none()).map(|c| (c.a, c.b, Self::offer_items(&c, false)));
+        if plan.is_none() && spell.is_none() && late_fix.is_none() {
+            for (a, b, items) in late_offer.into_iter().chain(offer) {
                 self.add_offer(a, b, items);
             }
             return;
@@ -618,6 +791,23 @@ impl Worker {
                 first = first.min(*a);
                 self.stats.spell_fixes += 1;
             }
+            if let Some((a, b, new, _)) = &late_fix
+                && self.buf.replace_word(*a, *b, new)
+            {
+                first = first.min(*a);
+                self.stats.spell_fixes += 1;
+                if let Some(w) = &late_word {
+                    self.memory.unhit(w);
+                }
+                let delta = new.chars().count() as isize - (*b - *a) as isize;
+                self.shift_offers(*b, delta);
+                if let Some(o) = offer.as_mut()
+                    && o.0 >= *b
+                {
+                    o.0 = (o.0 as isize + delta) as usize;
+                    o.1 = (o.1 as isize + delta) as usize;
+                }
+            }
             if first < before.chars.len() {
                 let old: String = before.chars[first..].iter().map(Ch::render).collect();
                 let text: String = self.buf.chars[first..].iter().map(Ch::render).collect();
@@ -628,9 +818,15 @@ impl Worker {
                     *self.stats.by_app.entry(self.proc_name.clone()).or_default() += 1;
                     if self.cfg.debug {
                         let p = spell.as_ref().map_or(String::new(), |s| format!(" (орфография {:.2})", s.3));
-                        println!("«{old}» → «{text}»{p}");
+                        let l =
+                            late_fix.as_ref().map_or(String::new(), |s| format!(" (по следующему слову {:.2})", s.3));
+                        println!("«{old}» → «{text}»{p}{l}");
                     }
-                    let word = if spell.is_some() { dict_word.clone() } else { None };
+                    let word = match (&spell, &late_fix) {
+                        (Some(_), _) => dict_word.clone(),
+                        (None, Some(_)) => late_word.clone(),
+                        _ => None,
+                    };
                     self.undo = Some(Undo { before, text, old, old_lay, word });
                     // Backspace отменяет, только если после правки ничего не набрано
                     if !typed_more {
@@ -645,11 +841,10 @@ impl Worker {
             }
         }
         CORRECTING.store(false, SeqCst);
-        if done
-            && pending.is_empty()
-            && let Some((a, b, items)) = offer
-        {
-            self.add_offer(a, b, items);
+        if done && pending.is_empty() {
+            for (a, b, items) in late_offer.into_iter().chain(offer) {
+                self.add_offer(a, b, items);
+            }
         }
         for ev in after.into_iter().rev() {
             pending.push_front(ev);
@@ -667,7 +862,8 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
             return;
         }
     };
-    set_status(format!("нейросеть на {}", model.device));
+    let status = format!("нейросеть на {}", model.device);
+    set_status(status.clone());
     if cfg.debug {
         println!("модель на {} за {:?}", model.device, t0.elapsed());
     }
@@ -691,6 +887,7 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         hwnd: 0,
         proc_name: String::new(),
         excluded: false,
+        layout_only: false,
         target_lay: None,
         undo: None,
         stats,
@@ -699,8 +896,14 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         speller: None,
         speller_failed: false,
         offers: Vec::new(),
+        recheck: None,
+        lm_loading: None,
+        lm_failed: false,
+        lm_hold: false,
+        status,
     };
     w.ensure_speller();
+    w.ensure_lm();
     let mut pending = VecDeque::new();
     loop {
         let ev = match pending.pop_front() {
@@ -710,7 +913,24 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
                 Err(_) => return,
             },
         };
-        w.handle(ev, &rx, &mut pending);
+        match ev {
+            Event::Flush => saver.force(&w.stats),
+            Event::ResetStats => {
+                w.stats = Stats::default();
+                saver.force(&w.stats);
+            }
+            Event::Models => {
+                w.lm_failed = false;
+                w.lm_hold = false;
+                w.ensure_lm();
+            }
+            Event::LmUnload => {
+                w.lm_hold = true;
+                w.ensure_lm();
+            }
+            Event::LmReady => w.ensure_lm(),
+            ev => w.handle(ev, &rx, &mut pending),
+        }
         if w.sync_offers() {
             w.show_offers();
         }

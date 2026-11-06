@@ -37,7 +37,12 @@ def pairs(src: str, cor: str, lang: str = "ru"):
             continue
         target = " ".join(b[j1:j2]).lower()
         if j2 - j1 == 1 and osa(typed, target) <= 2 or j2 - j1 == 2 and osa(typed, target.replace(" ", "")) <= 1:
-            yield typed, target, src[max(0, pos - 60) : pos].replace("\t", " ").replace("\n", " ")
+            end = pos + len(typed)
+            yield typed, target, clean(src[max(0, pos - 60) : pos]), clean(src[end : end + 30])
+
+
+def clean(s: str) -> str:
+    return s.replace("\t", " ").replace("\r", " ").replace("\n", " ")
 
 
 def main(root: Path):
@@ -53,19 +58,20 @@ def main(root: Path):
             r = json.loads(line)
             stats["предложений"] += 1
             src = f"{domain}/{p.stem}"
-            for typed, target, ctx in pairs(r["source"], r["correction"]):
+            for typed, target, ctx, right in pairs(r["source"], r["correction"]):
                 kind = "split" if " " in target else "typo"
                 where = "словарное" if typed in d.freq else "вне словаря"
                 stats[f"{kind}, {where}"] += 1
-                out.append((typed, target, ctx, src, kind, where))
+                out.append((typed, target, ctx, src, kind, where, right))
             # слова вне словаря, которые разметчики оставили: учим не трогать
             kept = set(WORD.findall(r["correction"].lower()))
             for m in WORD.finditer(r["source"]):
                 w = m.group().lower()
                 if m.group() == w and 3 <= len(w) <= 20 and w not in d.freq and w in kept:
                     stats["keep, вне словаря"] += 1
-                    out.append((w, "", r["source"][max(0, m.start() - 60) : m.start()].replace("\t", " "), src, "keep", "вне словаря"))
-    lines = ["слово\tверное\tконтекст\tисточник\tтип\tнабранное"]
+                    s = r["source"]
+                    out.append((w, "", clean(s[max(0, m.start() - 60) : m.start()]), src, "keep", "вне словаря", clean(s[m.end() : m.end() + 30])))
+    lines = ["слово\tверное\tконтекст\tисточник\tтип\tнабранное\tсправа"]
     lines += ["\t".join(r) for r in out]
     (paths.ROOT / "spell" / "open_pairs.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     for k, v in sorted(stats.items()):
@@ -88,21 +94,21 @@ def main_en(parquet: Path, wiki_list: Path):
         if not prose(src) or not src.isascii():
             continue
         stats["строк текста"] += 1
-        for typed, target, ctx in pairs(src, cor, "en"):
+        for typed, target, ctx, right in pairs(src, cor, "en"):
             if target.replace(" ", "") not in d.freq and target not in d.freq:
                 continue  # имена из кода
             kind = "split" if " " in target else "typo"
             where = "словарное" if typed in d.freq else "вне словаря"
             stats[f"{kind}, {where}"] += 1
-            out.append((typed, target, ctx.replace("\r", " "), "github_typo_corpus", kind, where))
+            out.append((typed, target, ctx, "github_typo_corpus", kind, where, right))
         # слова вне словаря, оставленные правкой, — «не трогать» (не больше одного со строки)
         kept = set(WORDS["en"].findall(cor.lower()))
         for m in WORDS["en"].finditer(src):
             w = m.group()
             if w.islower() and 3 <= len(w) <= 20 and w not in d.freq and w in kept and stats["keep, вне словаря"] < 30000:
                 stats["keep, вне словаря"] += 1
-                ctx = src[max(0, m.start() - 60) : m.start()].replace("\t", " ").replace("\r", " ")
-                out.append((w, "", ctx, "github_typo_corpus", "keep", "вне словаря"))
+                ctx = clean(src[max(0, m.start() - 60) : m.start()])
+                out.append((w, "", ctx, "github_typo_corpus", "keep", "вне словаря", clean(src[m.end() : m.end() + 30])))
                 break
     # список Википедии: пары без контекста, контекст — из предложений корпуса с верным словом
     wiki = []
@@ -114,7 +120,7 @@ def main_en(parquet: Path, wiki_list: Path):
         if WORDS["en"].fullmatch(w) and 3 <= len(w) <= 20 and w not in d.freq and targets[0] in d.freq:
             wiki.append((w, targets[0]))
     need = {t for _, t in wiki}
-    ctxs: dict[str, list[str]] = {}
+    ctxs: dict[str, list[tuple[str, str]]] = {}
     with open(paths.CORPUS / "en.train.txt", encoding="utf-8") as f:
         for i, line in enumerate(f):
             if i >= 1_500_000:
@@ -123,12 +129,12 @@ def main_en(parquet: Path, wiki_list: Path):
             for m in WORDS["en"].finditer(low):
                 w = m.group()
                 if w in need and len(ctxs.setdefault(w, [])) < 2:
-                    ctxs[w].append(line[max(0, m.start() - 60) : m.start()].replace("\t", " ").strip())
+                    ctxs[w].append((clean(line[max(0, m.start() - 60) : m.start()]).strip(), clean(line[m.end() : m.end() + 30])))
     for w, t in wiki:
-        for ctx in ctxs.get(t, []):
+        for ctx, right in ctxs.get(t, []):
             stats["wiki typo, вне словаря"] += 1
-            out.append((w, t, ctx, "wikipedia_misspellings", "typo", "вне словаря"))
-    lines = ["слово\tверное\tконтекст\tисточник\tтип\tнабранное"]
+            out.append((w, t, ctx, "wikipedia_misspellings", "typo", "вне словаря", right))
+    lines = ["слово\tверное\tконтекст\tисточник\tтип\tнабранное\tсправа"]
     lines += ["\t".join(r) for r in out]
     (paths.ROOT / "spell" / "open_pairs_en.tsv").write_text("\n".join(lines) + "\n", encoding="utf-8")
     for k, v in sorted(stats.items()):

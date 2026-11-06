@@ -15,8 +15,9 @@ from layouts import ROWS
 K = 16  # кандидатов в группе; 0-й — «оставить как есть»
 SPLITS = 3  # разбивок слитного набора среди кандидатов, не больше
 SHORT_FREQ = 8000  # часть разбивки до 3 букв — только частое слово («ко» да, «ка» нет)
-CTX, WLEN = 40, 20
-L = CTX + 2 * WLEN + 2 + 3  # контекст, SEP, набранное, SEP, кандидат, 3 признака
+CTX, WLEN, RCTX = 40, 20, 20
+L = CTX + 2 * WLEN + RCTX + 3 + 3  # контекст, SEP, набранное, SEP, кандидат, SEP, справа, 3 признака
+R0 = CTX + 2 * WLEN + 3  # начало правого контекста
 ALPHABET = {"ru": "абвгдеёжзийклмнопрстуфхцчшщъыьэюя", "en": "abcdefghijklmnopqrstuvwxyz"}
 # однобуквенные слова, которые могут стоять отдельно при разбивке слитного набора
 SINGLE = {"ru": "авикосуя", "en": "ai"}
@@ -41,8 +42,8 @@ def encode(s: str, n: int) -> list[int]:
     return [CHAR_ID.get(c, UNK) for c in s[:n]]
 
 
-def row(ctx: str, typed: str, cand: str, rank: int = 0, dist: int = 0, freq: int = 0) -> np.ndarray:
-    """Контекст слева прижат к SEP; слова — с начала своих полей; в конце признаки."""
+def row(ctx: str, typed: str, cand: str, rank: int = 0, dist: int = 0, freq: int = 0, right: str = "") -> np.ndarray:
+    """Контекст слева прижат к SEP; слова и контекст справа — с начала своих полей; в конце признаки."""
     out = np.zeros(L, np.uint8)
     out[L - 3] = F_RANK + rank
     out[L - 2] = F_DIST + min(dist, 2)
@@ -55,6 +56,21 @@ def row(ctx: str, typed: str, cand: str, rank: int = 0, dist: int = 0, freq: int
     out[CTX + 1 + WLEN] = SEP
     k = encode(cand, WLEN)
     out[CTX + 2 + WLEN : CTX + 2 + WLEN + len(k)] = k
+    out[R0 - 1] = SEP
+    r = encode(right.lower(), RCTX)
+    out[R0 : R0 + len(r)] = r
+    return out
+
+
+def widen(x: np.ndarray) -> np.ndarray:
+    """Группы старого формата (до правого контекста, L = 85) → текущая разметка."""
+    if x.shape[-1] == L:
+        return x
+    old = x.shape[-1]
+    out = np.zeros(x.shape[:-1] + (L,), x.dtype)
+    out[..., : old - 3] = x[..., : old - 3]
+    out[..., old - 3] = SEP
+    out[..., L - 3 :] = x[..., old - 3 :]
     return out
 
 

@@ -42,6 +42,11 @@ fn open(h: *mut c_void, what: &str) -> Result<Handle, String> {
 
 /// GET по https; редиректы WinHTTP проходит сам.
 fn get(url: &str) -> Result<Vec<u8>, String> {
+    get_with(url, &mut |_| true)
+}
+
+/// GET с отчётом о ходе: on получает число принятых байт; false — прервать.
+pub fn get_with(url: &str, on: &mut dyn FnMut(usize) -> bool) -> Result<Vec<u8>, String> {
     let rest = url.strip_prefix("https://").ok_or("только https")?;
     let (host, path) = match rest.split_once('/') {
         Some((h, p)) => (h, format!("/{p}")),
@@ -93,6 +98,9 @@ fn get(url: &str) -> Result<Vec<u8>, String> {
             let mut read = 0u32;
             WinHttpReadData(r.0, out[start..].as_mut_ptr().cast(), avail, &mut read).map_err(|e| e.to_string())?;
             out.truncate(start + read as usize);
+            if !on(out.len()) {
+                return Err("отменено".into());
+            }
             if out.len() > 300 << 20 {
                 return Err("слишком большой ответ".into());
             }
@@ -143,7 +151,7 @@ pub fn check() -> Result<Option<Release>, String> {
     Ok(is_newer(&rel.version, VERSION).then_some(rel))
 }
 
-fn sha256_hex(data: &[u8]) -> Result<String, String> {
+pub fn sha256_hex(data: &[u8]) -> Result<String, String> {
     let mut out = [0u8; 32];
     let st = unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, data, &mut out) };
     if st.0 != 0 {

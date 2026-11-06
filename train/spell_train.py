@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import math
+import os
 import sys
 import time
 from pathlib import Path
@@ -14,7 +15,7 @@ import torch
 import torch.nn.functional as F
 
 import paths
-from spell_common import K
+from spell_common import K, widen
 from spell_model import SpellNet, load_net, save_net
 
 DATA = paths.ROOT / "spell"
@@ -22,7 +23,7 @@ DATA = paths.ROOT / "spell"
 
 def load(name: str, dev):
     d = np.load(DATA / f"{name}.npz")
-    return torch.from_numpy(d["x"]).to(dev), torch.from_numpy(d["m"]).to(dev), torch.from_numpy(d["y"]).long().to(dev)
+    return torch.from_numpy(widen(d["x"])).to(dev), torch.from_numpy(d["m"]).to(dev), torch.from_numpy(d["y"]).long().to(dev)
 
 
 def logits(model, x, m):
@@ -32,8 +33,10 @@ def logits(model, x, m):
 
 
 @torch.no_grad()
-def evaluate(model, data, bs=256):
+def evaluate(model, data, bs=64):
     model.eval()
+    # кэш обучения не годится под размер проверки
+    torch.cuda.empty_cache()
     x, m, y = data
     loss = acc = 0.0
     for i in range(0, len(x), bs):
@@ -47,6 +50,16 @@ def evaluate(model, data, bs=256):
     return loss / len(x), acc / len(x)
 
 
+def checkpoint(path: Path, **state) -> None:
+    """Запись через временный файл: сбой не портит прежний."""
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        torch.save(state, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--steps", type=int, default=30000)
@@ -58,6 +71,9 @@ if __name__ == "__main__":
     ap.add_argument("--layers", type=int, default=3)
     ap.add_argument("--heads", type=int, default=4)
     ap.add_argument("--init", type=Path, help="дообучить с чекпойнта")
+    ap.add_argument("--data", default="", help="префикс набора: ctx_ → ctx_train, ctx_valid")
+    ap.add_argument("--ckpt-min", type=float, default=30, help="полное сохранение раз в столько минут")
+    ap.add_argument("--resume", action="store_true", help="продолжить с <out>.ckpt")
     a = ap.parse_args()
     cfg = {"d": a.d, "layers": a.layers, "heads": a.heads, "ff": 3 * a.d}
     if a.init:
@@ -69,15 +85,24 @@ if __name__ == "__main__":
 
     dev = torch.device("cuda")
     torch.manual_seed(0)
-    tr, va = load("train", dev), load("valid", dev)
+    tr, va = load(a.data + "train", dev), load(a.data + "valid", dev)
     model = (load_net(a.init).train() if a.init else SpellNet(**cfg)).to(dev)
     print(f"параметров {sum(p.numel() for p in model.parameters()):,}, групп {len(tr[0]):,}, стоп {stop:%H:%M}", flush=True)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, betas=(0.9, 0.98), weight_decay=0.01)
     sched = torch.optim.lr_scheduler.LambdaLR(
         opt, lambda s: min(1.0, s / 500) * 0.5 * (1 + math.cos(math.pi * min(s, a.steps) / a.steps))
     )
-    t0, best = time.time(), 9.0
-    for step in range(1, a.steps + 1):
+    t0, best, first = time.time(), 9.0, 1
+    ckpt = a.out.with_suffix(".ckpt")
+    if a.resume and ckpt.exists():
+        ck = torch.load(ckpt, map_location=dev)
+        model.load_state_dict(ck["state"])
+        opt.load_state_dict(ck["opt"])
+        sched.load_state_dict(ck["sched"])
+        first, best, t0 = ck["step"] + 1, ck["best"], time.time() - ck["elapsed"]
+        print(f"продолжение с шага {first}", flush=True)
+    saved = time.time()
+    for step in range(first, a.steps + 1):
         idx = torch.randint(0, len(tr[0]), (a.bs,), device=dev)
         with torch.autocast("cuda", torch.bfloat16):
             z = logits(model, tr[0][idx], tr[1][idx])
@@ -94,6 +119,10 @@ if __name__ == "__main__":
             if vl < best:
                 best = vl
                 save_net(model, cfg, a.out)
+        if last or step == a.steps or time.time() - saved >= a.ckpt_min * 60:
+            checkpoint(ckpt, cfg=cfg, state=model.state_dict(), opt=opt.state_dict(), sched=sched.state_dict(), step=step, best=best, elapsed=time.time() - t0)
+            saved = time.time()
+            print(f"сохранено: шаг {step}, {dt.datetime.now():%H:%M}", flush=True)
         if last:
             print("дедлайн: остановка", flush=True)
             break

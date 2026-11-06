@@ -47,6 +47,16 @@ impl Memory {
         self.flush();
     }
 
+    /// Слово всё же исправлено при перепроверке: снять засчитанный раз.
+    pub fn unhit(&mut self, w: &str) {
+        if let Some(n) = self.counts.get_mut(w)
+            && *n > 0
+        {
+            *n -= 1;
+            self.dirty = true;
+        }
+    }
+
     /// Не чаще раза в минуту: tmp + переименование, чтобы не потерять файл на полпути.
     fn flush(&mut self) {
         if !self.dirty || self.saved.elapsed() < SAVE_EVERY {
@@ -80,5 +90,7 @@ mod tests {
         assert!(m.safe("кода"));
         m.hit("фид", SAFE);
         assert!(m.safe("фид"));
+        m.unhit("кода");
+        assert!(!m.safe("кода"));
     }
 }

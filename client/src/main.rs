@@ -1,18 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autostart;
+mod bpe;
 mod engine;
 mod focus;
 mod hook;
 mod input;
 mod keymap;
 mod lists;
+mod lm;
+mod lmstore;
 mod memory;
 mod ov;
 mod popup;
+mod prefs;
 mod settings;
 mod spell;
 mod stats;
+mod theme;
 mod tray;
 mod update;
 mod worker;
@@ -30,6 +35,7 @@ use windows::core::w;
 use engine::{Buffer, Ch};
 use keymap::{EN, KEYMAP, OTHER, RU, SPACE};
 
+#[derive(Clone)]
 pub struct Config {
     pub ov_dir: PathBuf,
     pub model: PathBuf,
@@ -43,6 +49,9 @@ pub struct Config {
     pub spell: bool,
     pub spell_threshold: f32,
     pub spell_dict_threshold: f32,
+    /// Папка необязательной языковой модели.
+    pub lm_dir: PathBuf,
+    pub lm: bool,
 }
 
 fn config() -> (Config, Option<String>) {
@@ -63,6 +72,8 @@ fn config() -> (Config, Option<String>) {
         spell: true,
         spell_threshold: 0.70,
         spell_dict_threshold: 0.90,
+        lm_dir: lmstore::dir(),
+        lm: true,
     };
     let mut selftest = None;
     let mut args = std::env::args().skip(1);
@@ -77,6 +88,8 @@ fn config() -> (Config, Option<String>) {
             "--no-update-check" => c.update_check = false,
             "--expect" => c.expect = args.next(),
             "--no-spell" => c.spell = false,
+            "--no-lm" => c.lm = false,
+            "--lm-dir" => c.lm_dir = args.next().unwrap_or_default().into(),
             "--spell-threshold" => {
                 c.spell_threshold = args.next().and_then(|v| v.parse().ok()).unwrap_or(c.spell_threshold)
             }
@@ -84,8 +97,26 @@ fn config() -> (Config, Option<String>) {
                 c.spell_dict_threshold = args.next().and_then(|v| v.parse().ok()).unwrap_or(c.spell_dict_threshold)
             }
             "--spelltest" => selftest = args.next().map(|t| format!("\u{2}{t}")),
+            "--ranktest" => selftest = args.next().map(|t| format!("\u{3}{t}")),
             "--popup-demo" => {
+                settings::load();
+                match args.next().as_deref() {
+                    Some("dark") => settings::THEME.store(theme::DARK, std::sync::atomic::Ordering::SeqCst),
+                    Some("light") => settings::THEME.store(theme::LIGHT, std::sync::atomic::Ordering::SeqCst),
+                    _ => {}
+                }
                 popup::demo();
+                std::process::exit(0);
+            }
+            "--settings" => {
+                let rest: Vec<String> = args.collect();
+                let page = rest.iter().find_map(|a| a.parse().ok()).unwrap_or(0);
+                let theme = rest.iter().find_map(|a| match a.as_str() {
+                    "dark" => Some(theme::DARK),
+                    "light" => Some(theme::LIGHT),
+                    _ => None,
+                });
+                prefs::run(page, rest.iter().any(|a| a == "quiet"), theme);
                 std::process::exit(0);
             }
             "--version" => {
@@ -124,51 +155,140 @@ pub fn load_speller(c: &Config) -> Result<spell::Speller, String> {
     Ok(spell::Speller::new(ru, en, known, model, c.spell_threshold, c.spell_dict_threshold))
 }
 
-/// Орфография по словам фразы, как будто каждое слово только что набрано.
+/// Языковая модель из папки установки; файлы сверяются с перечнем, вшитым в программу.
+pub fn load_lm(c: &Config) -> Result<lm::Lm, String> {
+    let _ = std::fs::create_dir_all(&c.cache_dir);
+    let devs: Vec<&str> = c.devices.iter().map(String::as_str).collect();
+    lm::Lm::load(&c.ov_dir, &c.lm_dir, &devs, &c.cache_dir)
+}
+
+/// Для проверок из командной строки: языковая модель сразу, без фоновой загрузки.
+fn attach_lm(c: &Config, sp: &mut spell::Speller) {
+    if !c.lm || !lmstore::installed(&c.lm_dir) {
+        return;
+    }
+    let t = std::time::Instant::now();
+    // как в резиденте: загрузка в другом потоке
+    let cfg = c.clone();
+    let loaded = std::thread::spawn(move || load_lm(&cfg)).join().unwrap_or_else(|_| Err("загрузка прервана".into()));
+    match loaded {
+        Ok(lm) => {
+            eprintln!("языковая модель на {}, загрузка {:?}", lm.device, t.elapsed());
+            sp.lm = Some(lm);
+        }
+        Err(e) => eprintln!("языковая модель не загружена: {e}"),
+    }
+}
+
+/// Решения клиента для файла «слово⇥слева⇥справа»: правка, стадия (1 — на границе слова, 2 — после следующего)
+/// и уверенность. Для сверки с расчётом (train/lm_client_eval.py).
+fn ranktest(c: &Config, path: &str) -> Result<(), String> {
+    let mut sp = load_speller(c)?;
+    attach_lm(c, &mut sp);
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let t0 = std::time::Instant::now();
+    let (mut n, mut mixed) = (0u32, 0u32);
+    for line in text.lines() {
+        let mut f = line.split('\t');
+        let (word, ctx, right) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
+        let ru = word.chars().any(|ch| ('а'..='я').contains(&ch) || ch == 'ё');
+        let (mut out, mut stage, mut conf) = ("-".to_string(), 0, 0f32);
+        if let Some(r) = sp.rank(ctx, word, "", ru)? {
+            mixed += r.lm as u32;
+            let (w, p) = &r.items[0];
+            if w != word && *p >= sp.threshold_for(r.in_dict, r.lm) {
+                (out, stage, conf) = (w.clone(), 1, *p);
+            } else if sp.lm.is_some()
+                && ru
+                && !right.trim().is_empty()
+                && let Some(r) = sp.rank(ctx, word, right, ru)?.filter(|r| r.lm)
+            {
+                let (w, p) = &r.items[0];
+                if w != word && *p >= sp.threshold_for(r.in_dict, true) {
+                    (out, stage, conf) = (w.clone(), 2, *p);
+                }
+            }
+        }
+        n += 1;
+        println!("{word}\t{out}\t{stage}\t{conf:.4}");
+    }
+    eprintln!("слов {n}, с языковой моделью {mixed}, в среднем {:?} на слово", t0.elapsed() / n.max(1));
+    Ok(())
+}
+
+/// Орфография по словам фразы, как в клиенте: слово на своей границе, затем ещё раз после следующего.
 fn spelltest(c: &Config, text: &str) -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let mut sp = load_speller(c)?;
     println!("загрузка {:?}", t0.elapsed());
-    let mut out = String::new();
-    let mut ctx = String::new();
+    attach_lm(c, &mut sp);
+    let mut out: Vec<char> = Vec::new();
+    // слово, оставленное на своей границе: начало в out, само слово, русское ли
+    let mut prev: Option<(usize, String, bool)> = None;
     for token in text.split(' ').filter(|w| !w.is_empty()) {
         let chars: Vec<char> = token.chars().collect();
-        let Some((lead, trail, ru)) = engine::spell_core(&chars) else {
-            out += token;
-            out.push(' ');
-            ctx = out.clone();
-            continue;
-        };
-        let word: String = chars[lead..chars.len() - trail].iter().collect();
-        let t = std::time::Instant::now();
-        let ranked = sp.rank(&format!("{ctx}{}", String::from_iter(&chars[..lead])), &word, ru)?;
-        let fix = ranked.as_ref().map(|r| r.items[0].clone());
-        let thr = ranked.as_ref().map_or(f32::INFINITY, |r| sp.threshold_for(r.in_dict));
-        if let Some(r) = &ranked {
-            let alt: Vec<String> = r.items.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
-            println!("  варианты{}: {}", if r.in_dict { " (словарное)" } else { "" }, alt.join(" "));
+        let mut shown = chars.clone();
+        let mut cur = None;
+        if let Some((lead, trail, ru)) = engine::spell_core(&chars) {
+            let word: String = chars[lead..chars.len() - trail].iter().collect();
+            let ctx: String = out.iter().chain(&chars[..lead]).collect();
+            let t = std::time::Instant::now();
+            let ranked = sp.rank(&ctx, &word, "", ru)?;
+            let thr = ranked.as_ref().map_or(f32::INFINITY, |r| sp.threshold_for(r.in_dict, r.lm));
+            if let Some(r) = &ranked {
+                let alt: Vec<String> = r.items.iter().take(4).map(|(w, p)| format!("{w}={p:.2}")).collect();
+                let lm = if r.lm { " с языковой моделью" } else { "" };
+                println!("  варианты{}{lm}: {}", if r.in_dict { " (словарное)" } else { "" }, alt.join(" "));
+            }
+            match ranked.as_ref().map(|r| &r.items[0]) {
+                Some((w, p)) if *w == word => {
+                    println!("  «{word}» оставить {p:.2}");
+                    cur = Some((out.len() + lead, word.clone(), ru));
+                }
+                Some((w, p)) if *p >= thr => {
+                    println!("  «{word}» → «{w}» {p:.2} ({:?})", t.elapsed());
+                    shown = chars[..lead]
+                        .iter()
+                        .copied()
+                        .chain(w.chars())
+                        .chain(chars[chars.len() - trail..].iter().copied())
+                        .collect();
+                }
+                Some((w, p)) => {
+                    println!("  «{word}» → «{w}»? {p:.2} — ниже порога");
+                    cur = Some((out.len() + lead, word.clone(), ru));
+                }
+                None => {}
+            }
         }
-        let shown = match &fix {
-            Some((w, p)) if *w == word => {
-                println!("  «{word}» оставить {p:.2}");
-                word
-            }
-            Some((w, p)) if *p >= thr => {
-                println!("  «{word}» → «{w}» {p:.2} ({:?})", t.elapsed());
-                w.clone()
-            }
-            Some((w, p)) => {
-                println!("  «{word}» → «{w}»? {p:.2} — ниже порога");
-                word
-            }
-            None => word,
-        };
-        out.extend(&chars[..lead]);
-        out += &shown;
-        out.extend(&chars[chars.len() - trail..]);
+        out.extend(shown);
         out.push(' ');
-        ctx = out.clone();
+        // предыдущее слово ещё раз, с текстом справа: только с языковой моделью
+        if let Some((start, word, ru)) = prev.take().filter(|p| p.2 && sp.lm.is_some()) {
+            let n = word.chars().count();
+            let ctx: String = out[..start].iter().collect();
+            let right: String = out[start + n..].iter().collect();
+            if let Some(r) = sp.rank(&ctx, &word, &right, ru)?.filter(|r| r.lm) {
+                let (w, p) = &r.items[0];
+                let after = format!("по следующему слову «{}»", right.trim());
+                if *w == word {
+                    println!("  «{word}» оставить {p:.2} {after}");
+                } else if *p >= sp.threshold_for(r.in_dict, r.lm) {
+                    println!("  «{word}» → «{w}» {p:.2} {after}");
+                    out.splice(start..start + n, w.chars());
+                    if let Some(c) = cur.as_mut()
+                        && c.0 > start
+                    {
+                        c.0 = (c.0 as isize + w.chars().count() as isize - n as isize) as usize;
+                    }
+                } else {
+                    println!("  «{word}» → «{w}»? {p:.2} {after} — ниже порога");
+                }
+            }
+        }
+        prev = cur;
     }
+    let out: String = out.into_iter().collect();
     println!("итог: {out}");
     match &c.expect {
         Some(e) if e.trim_end() != out.trim_end() => Err(format!("ожидалось: {e}")),
@@ -249,6 +369,13 @@ fn main() {
     if let Some(text) = st.as_deref().and_then(|t| t.strip_prefix('\u{1}')) {
         if let Err(e) = probe(&cfg, text) {
             eprintln!("ошибка: {e}");
+        }
+        return;
+    }
+    if let Some(path) = st.as_deref().and_then(|t| t.strip_prefix('\u{3}')) {
+        if let Err(e) = ranktest(&cfg, path) {
+            eprintln!("ошибка: {e}");
+            std::process::exit(1);
         }
         return;
     }

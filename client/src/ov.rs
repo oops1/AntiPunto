@@ -44,6 +44,9 @@ pub struct Model {
     pub device: String,
 }
 
+// SAFETY: объекты OpenVINO не привязаны к потоку; модель передаётся целиком и нигде не делится
+unsafe impl Send for Model {}
+
 fn check(lib: &Library, st: Status, what: &str) -> Result<(), String> {
     if st == 0 {
         return Ok(());

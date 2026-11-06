@@ -3,6 +3,7 @@
 --kind typo (по умолчанию): набранное — вне словаря (опечатка, слитное или редкое правильное слово).
 --kind dict: набранное — словарное слово; ошибка, совпавшая с другим словом («бела» → «была»),
 или правильное слово, которое надо оставить. У строки 0 — частота набранного.
+Контекст справа: пусто (первая проверка в клиенте), следующее слово (перепроверка) или RCTX символов.
 """
 
 import argparse
@@ -18,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import numpy as np
 
 import paths
-from spell_common import K, L, Dictionary, corrupt, corrupt1, osa, row
+from spell_common import K, L, RCTX, Dictionary, corrupt, corrupt1, osa, row
 from spell_keep import Bloom
 from spell_known import MODELS
 
@@ -26,6 +27,8 @@ WORDS = {"ru": re.compile(r"[а-яё]+"), "en": re.compile(r"[a-z]+")}
 P_KEEP = 0.35  # доля групп «правильное редкое слово — не трогать»
 P_SPLIT = 0.2  # доля опечаток «пропущен пробел»: «вчем» → «в чем»
 P_RW = 0.4  # словарный режим: доля попыток сделать ошибку, совпавшую со словом
+P_NO_RIGHT, P_NEXT = 0.35, 0.45  # доли групп без правого контекста и только со следующим словом
+NEXT = re.compile(r"\W*\w+\W?")
 
 _dicts: dict[str, Dictionary] = {}
 _keep: dict[str, list[str]] = {}
@@ -45,6 +48,18 @@ def init(split: str, kind: str = "typo"):
         _keep[lang] = [w for w in words if (zlib.crc32(w.encode()) % 10 == 0) == held]
 
 
+def right_ctx(sent: str, b: int, rng: random.Random) -> str:
+    """Текст справа от слова, как увидит клиент: ничего, следующее слово с разделителем или всё."""
+    r = rng.random()
+    if r < P_NO_RIGHT:
+        return ""
+    tail = sent[b : b + RCTX]
+    if r < P_NO_RIGHT + P_NEXT:
+        m = NEXT.match(tail)
+        return m.group() if m else tail
+    return tail
+
+
 def merged(d: Dictionary, sent: str, all_spans, rng: random.Random):
     """Два соседних слова без пробела; пробел мог стать буквой, в части — опечатка."""
     pairs = [(x, y) for x, y in zip(all_spans, all_spans[1:]) if sent[x[1] : y[0]] == " "]
@@ -62,10 +77,10 @@ def merged(d: Dictionary, sent: str, all_spans, rng: random.Random):
         if r < 0.45:
             # опечатка в одной из частей
             if len(w2) >= 3 and (len(w1) < 3 or rng.random() < 0.5):
-                return a, w1 + corrupt1(w2, d.lang, rng), f"{w1} {w2}"
+                return a, e, w1 + corrupt1(w2, d.lang, rng), f"{w1} {w2}"
             if len(w1) >= 3:
-                return a, corrupt1(w1, d.lang, rng) + w2, f"{w1} {w2}"
-    return a, w1 + gap + w2, f"{w1} {w2}"
+                return a, e, corrupt1(w1, d.lang, rng) + w2, f"{w1} {w2}"
+    return a, e, w1 + gap + w2, f"{w1} {w2}"
 
 
 def group(lang: str, sent: str, rng: random.Random):
@@ -82,7 +97,7 @@ def group(lang: str, sent: str, rng: random.Random):
         m = merged(d, sent, all_spans, rng)
         if m is None:
             return None
-        a, typed, target = m
+        a, b, typed, target = m
         ctx = sent[:a]
         if len(typed) > 20 or typed in d.freq or typed in _known:
             return None
@@ -102,10 +117,11 @@ def group(lang: str, sent: str, rng: random.Random):
     if not cands:
         return None
     opts = [typed] + cands
+    right = right_ctx(sent, b, rng)
     rows = np.zeros((K, L), np.uint8)
-    rows[0] = row(ctx, typed, typed)
+    rows[0] = row(ctx, typed, typed, right=right)
     for j, c in enumerate(cands, 1):
-        rows[j] = row(ctx, typed, c, j, osa(typed, c), d.freq_of(c))
+        rows[j] = row(ctx, typed, c, j, osa(typed, c), d.freq_of(c), right)
     mask = np.zeros(K, np.uint8)
     mask[: len(opts)] = 1
     return rows, mask, 0 if target is None else opts.index(target)
@@ -134,10 +150,11 @@ def group_dict(lang: str, sent: str, rng: random.Random):
     cands = d.candidates(typed)
     if not cands or (target is not None and target not in cands):
         return None
+    right = right_ctx(sent, b, rng)
     rows = np.zeros((K, L), np.uint8)
-    rows[0] = row(ctx, typed, typed, 0, 0, d.freq[typed])
+    rows[0] = row(ctx, typed, typed, 0, 0, d.freq[typed], right)
     for j, c in enumerate(cands, 1):
-        rows[j] = row(ctx, typed, c, j, osa(typed, c), d.freq_of(c))
+        rows[j] = row(ctx, typed, c, j, osa(typed, c), d.freq_of(c), right)
     mask = np.zeros(K, np.uint8)
     mask[: len(cands) + 1] = 1
     return rows, mask, 0 if target is None else cands.index(target) + 1

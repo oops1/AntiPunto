@@ -1,0 +1,18 @@
+# Языковая модель rugpt3small-1: перечень вшит в программу, по нему проверяются закачка и установленные файлы.
+meta	name	rugpt3small-1
+meta	bos	1
+meta	unk	3
+meta	rows	16
+meta	tokens	40
+meta	tail	24
+meta	hidden	768
+part	rugpt3small.part1	42058668	1172166cfeaec7190fd0b2c454f6db54a8c90eff11e0c2028402fa7bc2ed55c3
+part	rugpt3small.part2	42058668	b512adc316cdb1015025e81b7a11f4abc3347a04a324ec8859dc06d30e07edaf
+part	rugpt3small.part3	42058668	ec53c23304c7a7a31062099b94a8d5400edeabbf436401a7d8beb75a478370e3
+part	rugpt3small.part4	42058668	e22156eaefc4beff39015a9dcb4884717573fdb379f9ffe8c9ba34c3a932f740
+file	lm_body.xml	769296	3fc987ff4688e1473614a5b79cfa8e27ea6b83cb26a1892fcd3d078c5d641d45
+file	lm_body.bin	126152879	9b9ea2bb9a46724000fe6449d97f480efa0abd4218f5f2db234c177e64b7d891
+file	lm_head.xml	16113	7b986ad89594db3d6be33c968faa46118876a5a70f7e63b86031a5e1c313e03f
+file	lm_head.bin	38803856	304eb432236c1d7aa097b7aa062858af1963edeb6dd758461b439bfa3bffc2e9
+file	lm_vocab.txt	1221617	f666a8ac02bddda83bf27045f85c7d2a4c1f6c7df781ee4f2cbf5d00ab3a5c74
+file	lm_merges.txt	1270911	27219696946df6c368ba3e2801ec9af82ad44a72df3b0fdfb6858707cfe97704

@@ -1,6 +1,6 @@
 //! Списки пользователя: программы-исключения, слова-исключения, жёсткие слова.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
@@ -20,7 +20,11 @@ pub const IGNORE: &str = "ignore.txt";
 pub const FORCE: &str = "force.txt";
 
 const HEADERS: [(&str, &str); 3] = [
-    (PROGRAMS, "# Программы, в которых AntiPunto ничего не исправляет. Одна на строку, имя exe:\n# game.exe\n"),
+    (
+        PROGRAMS,
+        "# Программы с особым режимом. Одна на строку, имя exe:\n\
+         # game.exe — ничего не исправлять\n# code.exe = раскладка — только раскладка, без опечаток\n",
+    ),
     (IGNORE, "# Слова, которые никогда не исправлять (ники, сокращения). Одно на строку:\n# xnj\n"),
     (
         FORCE,
@@ -82,9 +86,63 @@ pub fn watch() {
     });
 }
 
+/// Что делать в программе из списка.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    /// Ничего не исправлять.
+    Off,
+    /// Только раскладка, без опечаток.
+    Layout,
+}
+
+/// Строка programs.txt: «имя.exe» или «имя.exe = раскладка».
+fn program(line: &str) -> (String, Mode) {
+    match line.split_once('=') {
+        Some((name, mode)) => {
+            let m = mode.trim().to_lowercase();
+            let layout = m.starts_with("раскладк") || m.starts_with("layout");
+            (name.trim().to_lowercase(), if layout { Mode::Layout } else { Mode::Off })
+        }
+        None => (line.to_lowercase(), Mode::Off),
+    }
+}
+
+/// Строки списка без комментариев и пустых.
+pub fn entries(name: &str) -> Vec<String> {
+    std::fs::read_to_string(path(name))
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(String::from)
+        .collect()
+}
+
+/// Переписать список: комментарии файла остаются сверху.
+pub fn save_entries(name: &str, items: &[String]) -> std::io::Result<()> {
+    ensure_files();
+    let old = std::fs::read_to_string(path(name)).unwrap_or_default();
+    let mut out: String = old.lines().filter(|l| l.trim_start().starts_with('#')).map(|l| format!("{l}\n")).collect();
+    for item in items.iter().map(|s| s.trim()).filter(|s| !s.is_empty() && !s.starts_with('#')) {
+        out += item;
+        out.push('\n');
+    }
+    std::fs::write(path(name), out)
+}
+
+pub fn programs() -> Vec<(String, Mode)> {
+    entries(PROGRAMS).iter().map(|l| program(l)).filter(|(n, _)| !n.is_empty()).collect()
+}
+
+pub fn save_programs(items: &[(String, Mode)]) -> std::io::Result<()> {
+    let lines: Vec<String> =
+        items.iter().map(|(n, m)| if *m == Mode::Layout { format!("{n} = раскладка") } else { n.clone() }).collect();
+    save_entries(PROGRAMS, &lines)
+}
+
 #[derive(Default)]
 pub struct Lists {
-    pub programs: HashSet<String>,
+    pub programs: HashMap<String, Mode>,
     pub ignore: HashSet<String>,
     pub force: HashSet<String>,
 }
@@ -106,7 +164,7 @@ impl Lists {
         if !DIRTY.swap(false, SeqCst) {
             return;
         }
-        self.programs = read(PROGRAMS, str::to_lowercase);
+        self.programs = programs().into_iter().collect();
         self.ignore = read(IGNORE, |l| norm(l.chars()));
         self.force = read(FORCE, |l| norm(l.chars()));
     }
@@ -122,6 +180,16 @@ pub fn add_program(name: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::Mode;
+
+    #[test]
+    fn program_modes() {
+        assert_eq!(super::program("Game.exe"), ("game.exe".into(), Mode::Off));
+        assert_eq!(super::program("Code.exe = раскладка"), ("code.exe".into(), Mode::Layout));
+        assert_eq!(super::program("far.exe=layout"), ("far.exe".into(), Mode::Layout));
+        assert_eq!(super::program("x.exe = выкл"), ("x.exe".into(), Mode::Off));
+    }
+
     #[test]
     fn norm() {
         assert_eq!(super::norm("GitHub,".chars()), "github");

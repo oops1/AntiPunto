@@ -157,6 +157,26 @@ fn install_with(dir: &Path, progress: &dyn Fn(u64, u64), stop: &AtomicBool, get:
     std::fs::rename(&tmp, dir).map_err(|e| format!("не удалось поставить модель: {e}"))
 }
 
+fn mark(dir: &Path) -> PathBuf {
+    dir.with_extension("loading")
+}
+
+/// Перед загрузкой модели: false — прошлая загрузка не дошла до конца (сбой или прерванный запуск),
+/// повторять её без спроса нельзя. Метку ставим на время загрузки, см. load_done.
+pub fn load_begin(dir: &Path) -> bool {
+    let m = mark(dir);
+    if m.exists() {
+        let _ = std::fs::remove_file(&m);
+        return false;
+    }
+    let _ = std::fs::write(&m, b"");
+    true
+}
+
+pub fn load_done(dir: &Path) {
+    let _ = std::fs::remove_file(mark(dir));
+}
+
 pub fn remove(dir: &Path) -> Result<(), String> {
     match std::fs::remove_dir_all(dir) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
@@ -241,6 +261,20 @@ mod tests {
         verify(&dir).unwrap();
         remove(&dir).unwrap();
         assert!(!installed(&dir));
+    }
+
+    #[test]
+    fn interrupted_load_is_not_repeated() {
+        let dir = std::env::temp_dir().join("antipunto-test-load-mark");
+        load_done(&dir);
+        assert!(load_begin(&dir));
+        // загрузка оборвалась: метка осталась
+        assert!(!load_begin(&dir));
+        // после отказа метка снята: пользователь может включить модель снова
+        assert!(load_begin(&dir));
+        load_done(&dir);
+        assert!(load_begin(&dir));
+        load_done(&dir);
     }
 
     /// Сбой и повреждённая часть переживаются повтором; постоянный сбой — ошибка после всех попыток.

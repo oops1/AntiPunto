@@ -51,8 +51,9 @@ jobs:
         working-directory: client
         shell: pwsh
         run: |
+          (Get-CimInstance Win32_Processor).Name
           $env:ANTIPUNTO_OV = python -c "import openvino, os; print(os.path.join(os.path.dirname(openvino.__file__), 'libs'))"
-          cargo test lm
+          cargo test lm -- --test-threads=1 --nocapture
 
       - name: Inno Setup
         shell: pwsh

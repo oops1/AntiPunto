@@ -369,10 +369,21 @@ impl Worker {
         if self.lm_failed || !lmstore::installed(&self.cfg.lm_dir) {
             return;
         }
+        if !lmstore::load_begin(&self.cfg.lm_dir) {
+            // прошлая загрузка оборвалась — возможно, сбой на этом процессоре: сами не повторяем
+            settings::set_lm(false);
+            set_status(format!("{}; языковая модель выключена: прошлая загрузка оборвалась", self.status));
+            if self.cfg.debug {
+                println!("языковая модель выключена: прошлая загрузка оборвалась");
+            }
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let cfg = self.cfg.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(load_lm(&cfg));
+            let loaded = load_lm(&cfg);
+            lmstore::load_done(&cfg.lm_dir);
+            let _ = tx.send(loaded);
             // подключить сразу, не дожидаясь следующего слова
             if let Some(ev) = crate::hook::SENDER.get() {
                 let _ = ev.send(Event::LmReady);

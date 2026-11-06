@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use crate::lm::Lm;
 use crate::ov::Model;
 
 pub const K: usize = 16;
@@ -17,6 +18,14 @@ const N_CHARS: i32 = 81;
 const F_RANK: i32 = N_CHARS + 3;
 const F_DIST: i32 = F_RANK + K as i32;
 const F_FREQ: i32 = F_DIST + 3;
+
+/// Языковая модель (подбор: train/lm_fit.py): вес её оценки и порог правки — вне словаря и для словарных слов.
+const LM_WEIGHT: f32 = 0.3;
+const LM_THRESHOLD: f32 = 0.84;
+const LM_DICT_WEIGHT: f32 = 0.75;
+const LM_DICT_THRESHOLD: f32 = 0.99;
+/// Словарное слово, в котором ранжировщик уверен, языковой моделью не проверяем.
+const LM_DICT_GATE: f32 = 0.9;
 
 fn char_id(c: char) -> i32 {
     CHARS.chars().position(|x| x == c).map_or(UNK, |i| i as i32 + 3)
@@ -372,11 +381,20 @@ pub fn row(ctx: &str, typed: &str, cand: &str, rank: usize, dist: usize, freq: u
     out
 }
 
+fn softmax(z: &[f32]) -> Vec<f32> {
+    let max = z.iter().cloned().fold(f32::MIN, f32::max);
+    let e: Vec<f32> = z.iter().map(|v| (v - max).exp()).collect();
+    let sum: f32 = e.iter().sum();
+    e.iter().map(|x| x / sum).collect()
+}
+
 /// Варианты модели, лучший первым; typed среди них — «оставить».
 pub struct Ranked {
     pub items: Vec<(String, f32)>,
     /// Набранное — словарное слово: ошибка могла совпасть с другим словом («бела» → «была»).
     pub in_dict: bool,
+    /// Оценки учли языковую модель: у них свой порог.
+    pub lm: bool,
 }
 
 pub struct Speller {
@@ -388,23 +406,31 @@ pub struct Speller {
     pub threshold: f32,
     /// Порог для словарных слов: выше, цена ложной правки больше.
     pub dict_threshold: f32,
+    /// Необязательная языковая модель: учитывает текст вокруг слова.
+    pub lm: Option<Lm>,
 }
 
 impl Speller {
     pub fn new(ru: Dict, en: Dict, known: Option<Known>, model: Model, threshold: f32, dict_threshold: f32) -> Speller {
-        Speller { ru, en, known, model, threshold, dict_threshold }
+        Speller { ru, en, known, model, threshold, dict_threshold, lm: None }
     }
 
     pub fn dict(&self, ru: bool) -> &Dict {
         if ru { &self.ru } else { &self.en }
     }
 
-    pub fn threshold_for(&self, in_dict: bool) -> f32 {
-        if in_dict { self.dict_threshold } else { self.threshold }
+    pub fn threshold_for(&self, in_dict: bool, lm: bool) -> f32 {
+        match (in_dict, lm) {
+            (false, false) => self.threshold,
+            (true, false) => self.dict_threshold,
+            (false, true) => LM_THRESHOLD,
+            (true, true) => LM_DICT_THRESHOLD,
+        }
     }
 
     /// Все варианты с вероятностями; None — не спрашивали (известное слово вне словаря).
-    pub fn rank(&mut self, ctx: &str, typed: &str, ru: bool) -> Result<Option<Ranked>, String> {
+    /// right — текст справа от слова: его видит только языковая модель.
+    pub fn rank(&mut self, ctx: &str, typed: &str, right: &str, ru: bool) -> Result<Option<Ranked>, String> {
         // поля по отдельности: модель занимаем мутабельно
         let d = if ru { &self.ru } else { &self.en };
         let in_dict = d.contains(typed);
@@ -415,19 +441,27 @@ impl Speller {
         if cands.is_empty() {
             return Ok(None);
         }
-        let items = Self::score(d, &mut self.model, ctx, typed, &cands)?;
-        Ok(Some(Ranked { items, in_dict }))
+        let mut probs = Self::score(d, &mut self.model, ctx, typed, &cands)?;
+        let opts: Vec<&str> = std::iter::once(typed).chain(cands.iter().map(String::as_str)).collect();
+        let mut mixed = false;
+        if ru
+            && (!in_dict || probs[0] < LM_DICT_GATE)
+            && let Some(lm) = self.lm.as_mut()
+            && let Some(sc) = lm.score(ctx, &opts, right)?
+        {
+            let w = if in_dict { LM_DICT_WEIGHT } else { LM_WEIGHT };
+            let z: Vec<f32> = probs.iter().zip(&sc).map(|(p, s)| p.max(1e-30).ln() + w * s).collect();
+            probs = softmax(&z);
+            mixed = true;
+        }
+        let mut items: Vec<(String, f32)> = opts.iter().zip(&probs).map(|(o, p)| (o.to_string(), *p)).collect();
+        // устойчивая: при равенстве выигрывает «оставить», как раньше
+        items.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Ok(Some(Ranked { items, in_dict, lm: mixed }))
     }
 
-    fn score(
-        d: &Dict,
-        model: &mut Model,
-        ctx: &str,
-        typed: &str,
-        cands: &[String],
-    ) -> Result<Vec<(String, f32)>, String> {
+    fn score(d: &Dict, model: &mut Model, ctx: &str, typed: &str, cands: &[String]) -> Result<Vec<f32>, String> {
         let mut x = vec![PAD; K * L];
-        let opts: Vec<&str> = std::iter::once(typed).chain(cands.iter().map(String::as_str)).collect();
         let t: Vec<char> = typed.chars().collect();
         // у словарного слова строка «оставить» несёт его частоту
         x[..L].copy_from_slice(&row(ctx, typed, typed, 0, 0, d.freq_of(typed)));
@@ -438,14 +472,7 @@ impl Speller {
         }
         let mut z = [0f32; K];
         model.infer(&[&x], &mut z)?;
-        let n = opts.len();
-        let max = z[..n].iter().cloned().fold(f32::MIN, f32::max);
-        let e: Vec<f32> = z[..n].iter().map(|v| (v - max).exp()).collect();
-        let sum: f32 = e.iter().sum();
-        let mut v: Vec<(String, f32)> = opts.iter().zip(&e).map(|(o, x)| (o.to_string(), x / sum)).collect();
-        // устойчивая: при равенстве выигрывает «оставить», как раньше
-        v.sort_by(|a, b| b.1.total_cmp(&a.1));
-        Ok(v)
+        Ok(softmax(&z[..cands.len() + 1]))
     }
 }
 
@@ -491,6 +518,41 @@ mod tests {
             n += 1;
         }
         assert!(n >= 50, "мало примеров: {n}");
+    }
+
+    /// Ошибка, ставшая другим словом, правится по тексту вокруг — только с языковой моделью.
+    /// Нужен OpenVINO: ANTIPUNTO_OV=<папка с openvino_c.dll>.
+    #[test]
+    fn lm_fixes_real_word_error() {
+        let Some(ov) = std::env::var_os("ANTIPUNTO_OV").map(std::path::PathBuf::from) else {
+            eprintln!("пропуск: нет ANTIPUNTO_OV");
+            return;
+        };
+        let models = Path::new(env!("CARGO_MANIFEST_DIR")).join("../models");
+        let cache = std::env::temp_dir().join("antipunto-test-ovcache");
+        let _ = std::fs::create_dir_all(&cache);
+        let model = Model::load_shaped(&ov, &models.join("spell.xml"), &["CPU"], &cache, &[K * L], K).unwrap();
+        let ru = Dict::load(&models.join("spell_ru.tsv"), true).unwrap();
+        let en = Dict::load(&models.join("spell_en.tsv"), false).unwrap();
+        let mut sp = Speller::new(ru, en, Known::load(&models.join("spell_known.bloom")).ok(), model, 0.70, 0.90);
+        let fix = |sp: &mut Speller, right: &str| {
+            let r = sp.rank("он пришел ", "дамой", right, true).unwrap().unwrap();
+            let (w, p) = r.items[0].clone();
+            (w != "дамой" && p >= sp.threshold_for(r.in_dict, r.lm)).then_some(w)
+        };
+        assert_eq!(fix(&mut sp, ""), None);
+        let dir = crate::lmstore::unpack_for_tests();
+        sp.lm = Some(Lm::load(&ov, &dir, &["CPU"], &cache).unwrap());
+        assert_eq!(fix(&mut sp, " поздно вечером").as_deref(), Some("домой"));
+        // жаргон и редкое слово остаются
+        for (ctx, word, right) in [("мы подключили два ", "фида", " и один форк"), ("", "вентральным", " отделом")]
+        {
+            let r = sp.rank(ctx, word, right, true).unwrap();
+            assert!(
+                r.is_none_or(|r| r.items[0].0 == word || r.items[0].1 < sp.threshold_for(r.in_dict, r.lm)),
+                "{word}"
+            );
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering::SeqCst;
 
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -19,7 +20,7 @@ use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 use crate::lists::{self, Mode};
 use crate::stats::Stats;
-use crate::{autostart, settings, theme, tray, update};
+use crate::{autostart, lmstore, settings, theme, tray, update};
 
 /// Клиентская область и боковая панель при 96 dpi.
 const W: f32 = 680.0;
@@ -28,12 +29,13 @@ const NAV_W: f32 = 170.0;
 const X0: f32 = 198.0;
 const CW: f32 = W - X0 - 28.0;
 
-const PAGES: [&str; 5] = ["Общее", "Программы", "Слова", "Статистика", "О программе"];
+const PAGES: [&str; 6] = ["Общее", "Программы", "Слова", "Модели", "Статистика", "О программе"];
 const P_GENERAL: usize = 0;
 const P_PROGRAMS: usize = 1;
 const P_WORDS: usize = 2;
-const P_STATS: usize = 3;
-const P_ABOUT: usize = 4;
+const P_MODELS: usize = 3;
+const P_STATS: usize = 4;
+const P_ABOUT: usize = 5;
 
 const ID_NAV: usize = 100; // + страница
 const ID_SPELL: usize = 200;
@@ -48,8 +50,13 @@ const ID_FOLDER: usize = 420;
 const ID_RESET: usize = 500;
 const ID_CHECK: usize = 600;
 const ID_SITE: usize = 601;
+const ID_LM_GET: usize = 700;
+const ID_LM_DEL: usize = 701;
+const ID_LM_USE: usize = 702;
+const ID_LM_SRC: usize = 703;
 
 const WM_UPDATE_DONE: u32 = WM_APP + 1;
+const WM_LM: u32 = WM_APP + 2;
 const TIMER_STATS: usize = 1;
 
 /// Списки слов на странице «Слова»: файл, подпись, пояснение.
@@ -78,7 +85,7 @@ enum Kind {
 fn kind(id: usize) -> Kind {
     match id {
         ID_NAV..ID_SPELL => Kind::Nav,
-        ID_SPELL | ID_SUGGEST | ID_AUTOSTART => Kind::Toggle,
+        ID_SPELL | ID_SUGGEST | ID_AUTOSTART | ID_LM_USE => Kind::Toggle,
         ID_THEME..ID_PROGRAMS | ID_MODE..ID_WORDS | ID_WORDLIST..ID_FOLDER => Kind::Radio,
         _ => Kind::Push,
     }
@@ -113,6 +120,23 @@ thread_local! {
 
 /// Итог проверки обновлений из фонового потока.
 static UPDATE: Mutex<String> = Mutex::new(String::new());
+
+/// Состояние языковой модели на странице «Модели»; меняют фоновые потоки.
+#[derive(Clone, PartialEq)]
+enum LmState {
+    Checking,
+    Absent,
+    /// Принято и всего, байт.
+    Loading(u64, u64),
+    Removing,
+    Ready,
+    /// Файлы есть, но не прошли сверку.
+    Bad(String),
+    Failed(String),
+}
+
+static LM: Mutex<LmState> = Mutex::new(LmState::Checking);
+static LM_STOP: AtomicBool = AtomicBool::new(false);
 
 // Изменяемый заём — только на время замыкания: внутри нельзя звать Win32, оно шлёт сообщения.
 fn st<R>(f: impl FnOnce(&State) -> R) -> R {
@@ -212,6 +236,7 @@ unsafe fn checked(hwnd: HWND, id: usize) -> bool {
         ID_SPELL => settings::SPELL.load(SeqCst),
         ID_SUGGEST => settings::SUGGEST.load(SeqCst),
         ID_AUTOSTART => autostart::enabled(),
+        ID_LM_USE => settings::LM.load(SeqCst),
         ID_NAV..ID_SPELL => st(|s| s.page) == id - ID_NAV,
         ID_THEME..ID_PROGRAMS => settings::THEME.load(SeqCst) as usize == id - ID_THEME,
         ID_MODE..ID_WORDS => {
@@ -444,6 +469,7 @@ unsafe fn paint_page(dc: HDC, rc: RECT) {
                 text(dc, small, pal.grey, X0, 102.0, CW, WORDLISTS[st(|s| s.wordlist)].2);
                 text(dc, small, pal.grey, X0 + 214.0, 399.0, CW - 214.0, "Изменения сохраняются сами.");
             }
+            P_MODELS => paint_models(dc),
             P_STATS => paint_stats(dc),
             _ => {
                 text(dc, bold, pal.ink, X0, 66.0, CW, "Исправляет раскладку и опечатки по смыслу фразы.");
@@ -513,6 +539,189 @@ unsafe fn paint_stats(dc: HDC) {
             CW - 204.0,
             "Считаются только числа — набранный текст не сохраняется.",
         );
+    }
+}
+
+fn mb(bytes: u64) -> u64 {
+    (bytes + (1 << 19)) >> 20
+}
+
+unsafe fn paint_models(dc: HDC) {
+    unsafe {
+        let pal = theme::palette();
+        let (font, bold, small) = st(|s| (s.font, s.bold, s.small));
+        text(dc, bold, pal.ink, X0, 62.0, CW, "Языковая модель rugpt3small");
+        text(
+            dc,
+            small,
+            pal.grey,
+            X0,
+            86.0,
+            CW,
+            "Смотрит на текст вокруг слова и помогает выбрать исправление: исправляется больше опечаток, \
+             в том числе тех, где получилось другое слово. Работает на этом компьютере, только для русского языка.",
+        );
+        let total = mb(lmstore::manifest().total());
+        let (line, color) = match LM.lock().unwrap().clone() {
+            LmState::Checking => ("Проверяю файлы модели…".to_string(), pal.grey),
+            LmState::Absent => (format!("Не установлена. Размер закачки — {total} МБ."), pal.ink),
+            LmState::Loading(done, all) => {
+                (format!("Загрузка: {} % ({} из {} МБ)", done * 100 / all.max(1), mb(done), mb(all)), pal.blue)
+            }
+            LmState::Removing => ("Удаляю…".to_string(), pal.grey),
+            LmState::Ready => ("Установлена, файлы проверены.".to_string(), pal.green),
+            LmState::Bad(e) => (format!("Не используется: {e}. Скачайте модель заново."), pal.red),
+            LmState::Failed(e) => (format!("Не получилось: {e}"), pal.red),
+        };
+        text(dc, font, color, X0, 142.0, CW, &line);
+        text(
+            dc,
+            small,
+            pal.grey,
+            X0 + 31.0,
+            274.0,
+            CW - 31.0,
+            "Если печатать стало заметно медленнее — выключите: модель останется на диске.",
+        );
+        text(
+            dc,
+            small,
+            pal.grey,
+            X0,
+            318.0,
+            CW,
+            "Модель скачивается из репозитория AntiPunto на GitHub. Перед каждым использованием её файлы \
+             сверяются с контрольными суммами, вшитыми в программу: изменённая модель не загрузится.",
+        );
+    }
+}
+
+fn lm_post(hwnd: isize) {
+    unsafe {
+        let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_LM, WPARAM(0), LPARAM(0));
+    }
+}
+
+fn lm_set(hwnd: isize, s: LmState) {
+    *LM.lock().unwrap() = s;
+    lm_post(hwnd);
+}
+
+/// Сверить установленные файлы с перечнем — в фоне: это чтение 170 МБ.
+fn lm_check(hwnd: HWND) {
+    if matches!(*LM.lock().unwrap(), LmState::Loading(..) | LmState::Removing) {
+        return;
+    }
+    let dir = lmstore::dir();
+    if !lmstore::installed(&dir) {
+        // неполный набор файлов — то же, что нет модели
+        *LM.lock().unwrap() = LmState::Absent;
+        return;
+    }
+    *LM.lock().unwrap() = LmState::Checking;
+    let h = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        lm_set(
+            h,
+            match lmstore::verify(&dir) {
+                Ok(()) => LmState::Ready,
+                Err(e) => LmState::Bad(e),
+            },
+        );
+    });
+}
+
+fn lm_download(hwnd: HWND) {
+    LM_STOP.store(false, SeqCst);
+    let total = lmstore::manifest().total();
+    *LM.lock().unwrap() = LmState::Loading(0, total);
+    // резидент отпускает прежние файлы: их заменят
+    ctl(tray::CTL_LM_UNLOAD);
+    let h = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let progress = |done: u64, all: u64| {
+            let mut s = LM.lock().unwrap();
+            let step = all.max(1) / 200;
+            let moved = !matches!(*s, LmState::Loading(d, _) if done < d + step && done < all);
+            if moved {
+                *s = LmState::Loading(done, all);
+                drop(s);
+                lm_post(h);
+            }
+        };
+        let done = lmstore::install(&lmstore::dir(), &progress, &LM_STOP);
+        lm_set(
+            h,
+            match done {
+                Ok(()) => LmState::Ready,
+                Err(_) if LM_STOP.load(SeqCst) => LmState::Absent,
+                Err(e) => LmState::Failed(e),
+            },
+        );
+        ctl(tray::CTL_RELOAD);
+    });
+}
+
+fn lm_remove(hwnd: HWND) {
+    *LM.lock().unwrap() = LmState::Removing;
+    ctl(tray::CTL_LM_UNLOAD);
+    let h = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        // резидент отпускает файлы не мгновенно
+        let mut last = Ok(());
+        for _ in 0..40 {
+            last = lmstore::remove(&lmstore::dir());
+            if last.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+        lm_set(
+            h,
+            match last {
+                Ok(()) => LmState::Absent,
+                Err(e) => LmState::Failed(format!("файлы заняты ({e})")),
+            },
+        );
+        ctl(tray::CTL_RELOAD);
+    });
+}
+
+/// Кнопки страницы «Модели» под текущее состояние.
+unsafe fn lm_buttons(hwnd: HWND) {
+    unsafe {
+        if st(|s| s.page) != P_MODELS {
+            return;
+        }
+        let s = LM.lock().unwrap().clone();
+        let (get, del) = match s {
+            LmState::Loading(..) => (Some("Отменить"), false),
+            LmState::Checking | LmState::Removing => (None, false),
+            LmState::Ready => (None, true),
+            LmState::Bad(_) => (Some("Скачать заново"), true),
+            LmState::Absent | LmState::Failed(_) => (Some("Скачать и установить"), lmstore::installed(&lmstore::dir())),
+        };
+        let (bg, bd) = (item(hwnd, ID_LM_GET), item(hwnd, ID_LM_DEL));
+        if let Some(label) = get {
+            let _ = SetWindowTextW(bg, &HSTRING::from(label));
+        }
+        // фокус не должен остаться на спрятанной кнопке
+        let focus = GetFocus();
+        if (focus == bg && get.is_none()) || (focus == bd && !del) {
+            let _ = SetFocus(Some(item(hwnd, ID_NAV + P_MODELS)));
+        }
+        let _ = ShowWindow(bg, if get.is_some() { SW_SHOW } else { SW_HIDE });
+        let _ = ShowWindow(bd, if del { SW_SHOW } else { SW_HIDE });
+        let _ = SetWindowPos(
+            bd,
+            None,
+            px(if get.is_some() { X0 + 228.0 } else { X0 }),
+            px(192.0),
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        redraw(hwnd, ID_LM_GET);
     }
 }
 
@@ -596,6 +805,10 @@ unsafe fn set_page(hwnd: HWND, page: usize) {
         match page {
             P_PROGRAMS => fill_progs(hwnd),
             P_WORDS => load_words(hwnd),
+            P_MODELS => {
+                lm_check(hwnd);
+                lm_buttons(hwnd);
+            }
             P_STATS => {
                 st_mut(|s| s.stats = Stats::load());
                 // резидент пишет счётчики раз в 30 с — попросить свежие
@@ -714,6 +927,35 @@ unsafe fn command(hwnd: HWND, id: usize, code: u32) {
                     let _ = PostMessageW(Some(HWND(h as *mut _)), WM_UPDATE_DONE, WPARAM(0), LPARAM(0));
                 });
             }
+            ID_LM_GET => {
+                if matches!(*LM.lock().unwrap(), LmState::Loading(..)) {
+                    LM_STOP.store(true, SeqCst);
+                } else {
+                    lm_download(hwnd);
+                }
+                lm_buttons(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, true);
+            }
+            ID_LM_DEL => {
+                let q = w!("Удалить языковую модель с диска? Её можно будет скачать снова.");
+                if MessageBoxW(Some(hwnd), q, w!("AntiPunto"), MB_YESNO | MB_ICONQUESTION) == IDYES {
+                    lm_remove(hwnd);
+                    lm_buttons(hwnd);
+                    let _ = InvalidateRect(Some(hwnd), None, true);
+                }
+            }
+            ID_LM_USE => {
+                settings::set_lm(!settings::LM.load(SeqCst));
+                ctl(tray::CTL_RELOAD);
+                redraw(hwnd, id);
+            }
+            ID_LM_SRC => {
+                let url = HSTRING::from(format!(
+                    "https://github.com/{}/blob/main/models/Ext/rugpt3small/SOURCE.md",
+                    update::REPO
+                ));
+                ShellExecuteW(None, w!("open"), &url, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+            }
             ID_SITE => {
                 let url = HSTRING::from(format!("https://github.com/{}", update::REPO));
                 ShellExecuteW(None, w!("open"), &url, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
@@ -756,6 +998,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 let _ = InvalidateRect(Some(hwnd), None, true);
                 LRESULT(0)
             }
+            WM_LM => {
+                lm_buttons(hwnd);
+                let _ = InvalidateRect(Some(hwnd), None, true);
+                LRESULT(0)
+            }
             WM_SETTINGCHANGE => {
                 // сменили тему Windows
                 apply_theme(hwnd);
@@ -768,6 +1015,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             WM_CLOSE => {
                 save_words(hwnd);
+                LM_STOP.store(true, SeqCst);
                 let _ = DestroyWindow(hwnd);
                 LRESULT(0)
             }
@@ -846,6 +1094,11 @@ unsafe fn build(hwnd: HWND) {
         let edit = (ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN) as u32 | WS_VSCROLL.0 | WS_BORDER.0;
         child(hwnd, w!("EDIT"), "", edit, ID_WORDS, P_WORDS, (X0, 158.0, CW, 222.0));
         button("Открыть папку списков", ID_FOLDER, P_WORDS, (X0, 392.0, 200.0, 30.0));
+
+        button("Скачать и установить", ID_LM_GET, P_MODELS, (X0, 192.0, 220.0, 30.0));
+        button("Удалить", ID_LM_DEL, P_MODELS, (X0 + 228.0, 192.0, 110.0, 30.0));
+        button("Учитывать текст вокруг слова", ID_LM_USE, P_MODELS, (X0, 246.0, CW, 26.0));
+        button("Откуда модель и её лицензия", ID_LM_SRC, P_MODELS, (X0, 386.0, 250.0, 30.0));
 
         button("Сбросить счётчики", ID_RESET, P_STATS, (X0, 386.0, 190.0, 30.0));
 

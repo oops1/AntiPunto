@@ -38,6 +38,8 @@ const ID_SETTINGS: usize = 12;
 pub const CLASS: PCWSTR = w!("AntiPunto_tray");
 /// Команды окна настроек (wParam сообщения `ctl_msg`).
 pub const CTL_RELOAD: usize = 1;
+/// Отпустить файлы языковой модели перед удалением или заменой.
+pub const CTL_LM_UNLOAD: usize = 4;
 pub const CTL_FLUSH: usize = 2;
 pub const CTL_RESET: usize = 3;
 
@@ -283,6 +285,14 @@ fn control(hwnd: HWND, what: usize) {
         CTL_RELOAD => {
             settings::load();
             refresh(hwnd, true);
+            if let Some(tx) = SENDER.get() {
+                let _ = tx.send(Event::Models);
+            }
+        }
+        CTL_LM_UNLOAD => {
+            if let Some(tx) = SENDER.get() {
+                let _ = tx.send(Event::LmUnload);
+            }
         }
         CTL_FLUSH | CTL_RESET => {
             if let Some(tx) = SENDER.get() {

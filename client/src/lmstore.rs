@@ -2,12 +2,21 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::time::{Duration, Instant};
 
 use crate::update::{REPO, get_with, sha256_hex};
 
 /// Перечень частей и файлов с SHA-256: вшит при сборке, подменить его можно только вместе с программой.
 const MANIFEST: &str = include_str!("../../models/Ext/rugpt3small/manifest.tsv");
 const PATH: &str = "models/Ext/rugpt3small";
+
+/// Попыток на одну часть: сеть отдаёт большие файлы неровно.
+const ATTEMPTS: usize = 4;
+/// Закачка застыла, если за это время пришло меньше MIN_BYTES.
+const WINDOW: Duration = Duration::from_secs(15);
+const MIN_BYTES: usize = 300 << 10;
+
+type Fetch<'a> = &'a mut dyn FnMut(&str, &mut dyn FnMut(usize) -> bool) -> Result<Vec<u8>, String>;
 
 pub struct Entry {
     pub name: &'static str,
@@ -89,18 +98,46 @@ fn fetch(name: &str, on: &mut dyn FnMut(usize) -> bool) -> Result<Vec<u8>, Strin
 
 /// Скачать части, сверить, разрезать на файлы и поставить в dir; progress — (принято, всего) байт.
 pub fn install(dir: &Path, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Result<(), String> {
+    install_with(dir, progress, stop, &mut |name, on| fetch(name, on))
+}
+
+/// Одна часть: несколько попыток; застывшая закачка обрывается, сумма сверяется.
+fn part(p: &Entry, get: Fetch, on: &dyn Fn(u64), stop: &AtomicBool) -> Result<Vec<u8>, String> {
+    let mut last = String::new();
+    for _ in 0..ATTEMPTS {
+        let mut mark = (Instant::now(), 0usize);
+        let mut stalled = false;
+        let got = get(p.name, &mut |n| {
+            on(n as u64);
+            if mark.0.elapsed() >= WINDOW {
+                if n.saturating_sub(mark.1) < MIN_BYTES {
+                    stalled = true;
+                    return false;
+                }
+                mark = (Instant::now(), n);
+            }
+            !stop.load(SeqCst)
+        });
+        if stop.load(SeqCst) {
+            return Err("отменено".into());
+        }
+        last = match got {
+            Ok(data) if data.len() as u64 == p.size && sha256_hex(&data)? == p.sha => return Ok(data),
+            Ok(_) => format!("{}: контрольная сумма не совпала — закачка повреждена или подменена", p.name),
+            Err(_) if stalled => format!("{}: закачка застыла", p.name),
+            Err(e) => format!("{}: {e}", p.name),
+        };
+    }
+    Err(format!("{last} (попыток: {ATTEMPTS})"))
+}
+
+fn install_with(dir: &Path, progress: &dyn Fn(u64, u64), stop: &AtomicBool, get: Fetch) -> Result<(), String> {
     let m = manifest();
     let total = m.total();
     let mut blob: Vec<u8> = Vec::with_capacity(total as usize);
     for p in &m.parts {
         let done = blob.len() as u64;
-        let data = fetch(p.name, &mut |n| {
-            progress(done + n as u64, total);
-            !stop.load(SeqCst)
-        })?;
-        if data.len() as u64 != p.size || sha256_hex(&data)? != p.sha {
-            return Err(format!("{}: контрольная сумма не совпала — закачка повреждена или подменена", p.name));
-        }
+        let data = part(p, get, &|n| progress(done + n, total), stop)?;
         blob.extend_from_slice(&data);
     }
     let tmp = dir.with_extension("tmp");
@@ -118,6 +155,26 @@ pub fn install(dir: &Path, progress: &dyn Fn(u64, u64), stop: &AtomicBool) -> Re
     }
     let _ = std::fs::remove_dir_all(dir);
     std::fs::rename(&tmp, dir).map_err(|e| format!("не удалось поставить модель: {e}"))
+}
+
+fn mark(dir: &Path) -> PathBuf {
+    dir.with_extension("loading")
+}
+
+/// Перед загрузкой модели: false — прошлая загрузка не дошла до конца (сбой или прерванный запуск),
+/// повторять её без спроса нельзя. Метку ставим на время загрузки, см. load_done.
+pub fn load_begin(dir: &Path) -> bool {
+    let m = mark(dir);
+    if m.exists() {
+        let _ = std::fs::remove_file(&m);
+        return false;
+    }
+    let _ = std::fs::write(&m, b"");
+    true
+}
+
+pub fn load_done(dir: &Path) {
+    let _ = std::fs::remove_file(mark(dir));
 }
 
 pub fn remove(dir: &Path) -> Result<(), String> {
@@ -203,6 +260,54 @@ mod tests {
         assert_eq!(seen.load(SeqCst), m.total());
         verify(&dir).unwrap();
         remove(&dir).unwrap();
+        assert!(!installed(&dir));
+    }
+
+    #[test]
+    fn interrupted_load_is_not_repeated() {
+        let dir = std::env::temp_dir().join("antipunto-test-load-mark");
+        load_done(&dir);
+        assert!(load_begin(&dir));
+        // загрузка оборвалась: метка осталась
+        assert!(!load_begin(&dir));
+        // после отказа метка снята: пользователь может включить модель снова
+        assert!(load_begin(&dir));
+        load_done(&dir);
+        assert!(load_begin(&dir));
+        load_done(&dir);
+    }
+
+    /// Сбой и повреждённая часть переживаются повтором; постоянный сбой — ошибка после всех попыток.
+    #[test]
+    fn retries_broken_parts() {
+        let m = manifest();
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(PATH);
+        let dir = std::env::temp_dir().join(format!("antipunto-test-{}-retry", m.name));
+        let mut calls = 0;
+        let mut flaky = |name: &str, on: &mut dyn FnMut(usize) -> bool| {
+            calls += 1;
+            let mut data = std::fs::read(src.join(name)).map_err(|e| e.to_string())?;
+            on(data.len());
+            match calls {
+                2 => Err("обрыв".to_string()),
+                4 => {
+                    data[7] ^= 1;
+                    Ok(data)
+                }
+                _ => Ok(data),
+            }
+        };
+        install_with(&dir, &|_, _| {}, &AtomicBool::new(false), &mut flaky).unwrap();
+        assert_eq!(calls, m.parts.len() + 2);
+        verify(&dir).unwrap();
+        remove(&dir).unwrap();
+        let mut tries = 0;
+        let mut dead = |_: &str, _: &mut dyn FnMut(usize) -> bool| {
+            tries += 1;
+            Err("нет сети".to_string())
+        };
+        let e = install_with(&dir, &|_, _| {}, &AtomicBool::new(false), &mut dead).unwrap_err();
+        assert!(e.contains("нет сети") && tries == ATTEMPTS, "{e}");
         assert!(!installed(&dir));
     }
 }

@@ -56,6 +56,8 @@ pub fn get_with(url: &str, on: &mut dyn FnMut(usize) -> bool) -> Result<Vec<u8>,
         let agent = HSTRING::from(format!("AntiPunto/{VERSION}"));
         let s =
             open(WinHttpOpen(&agent, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0), "open")?;
+        // застывшее соединение обрывается само: имя, связь, отправка, приём — мс
+        let _ = WinHttpSetTimeouts(s.0, 10_000, 15_000, 15_000, 20_000);
         let c = open(WinHttpConnect(s.0, &HSTRING::from(host), 443, 0), "connect")?;
         let r = open(
             WinHttpOpenRequest(

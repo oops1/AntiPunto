@@ -35,6 +35,16 @@ def load_net(path: Path) -> SpellNet:
     """Чекпойнт с размером модели; старые (v1–v4) — голые веса маленькой модели."""
     ck = torch.load(path, map_location="cpu")
     cfg, state = (ck["cfg"], ck["state"]) if "cfg" in ck else ({}, ck)
+    pos = state["pos"]
+    if pos.shape[1] != L:
+        # строка стала длиннее (правый контекст): старые позиции на месте, признаки — в конце
+        old = pos.shape[1]
+        new = torch.zeros(1, L, pos.shape[2])
+        # новые позиции того же масштаба, что выученные: иначе их не отличить от беспозиционных
+        torch.nn.init.normal_(new, std=float(pos[:, : old - 3].detach().std()))
+        new[:, : old - 3] = pos[:, : old - 3]
+        new[:, L - 3 :] = pos[:, old - 3 :]
+        state = dict(state, pos=new)
     net = SpellNet(**cfg).eval()
     net.load_state_dict(state)
     return net

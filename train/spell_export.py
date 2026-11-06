@@ -11,7 +11,7 @@ import openvino as ov
 import torch
 
 import paths
-from spell_common import K, L
+from spell_common import K, L, widen
 from spell_model import load_net
 
 DATA = paths.ROOT / "spell"
@@ -35,7 +35,7 @@ def main():
     ov.save_model(ovm, DATA / "spell.xml", compress_to_fp16=True)
 
     d = np.load(DATA / "valid.npz")
-    x = d["x"][:50].astype(np.int32)
+    x = widen(d["x"][:50]).astype(np.int32)
     core = ov.Core()
     for dev in ("CPU", "NPU"):
         cm = core.compile_model(DATA / "spell.xml", dev, {"INFERENCE_PRECISION_HINT": "f32"} if dev == "CPU" else {})

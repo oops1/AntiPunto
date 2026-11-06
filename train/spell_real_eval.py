@@ -23,9 +23,9 @@ THRESHOLDS = (0.6, 0.7, 0.8, 0.85, 0.9)
 def load_cases():
     ctx = {}
     for line in (DATA / "real_words.tsv").read_text(encoding="utf-8").splitlines()[1:]:
-        lang, w, _, _, _, _, c = (line.split("\t") + [""] * 7)[:7]
+        lang, w, _, _, _, _, c, r = (line.split("\t") + [""] * 8)[:8]
         if lang == "ru":
-            ctx[w] = c
+            ctx[w] = (c, r)
     cases = []
     lines = (DATA / "real_ru_labels.tsv").read_text(encoding="utf-8").splitlines()[1:]
     counts = dict(l.split("\t")[:2] for l in (DATA / "real_ru_unlabeled.tsv").read_text(encoding="utf-8").splitlines()[1:])
@@ -38,10 +38,11 @@ def load_cases():
                 counts.setdefault(p[1], p[2])
     for line in lines:
         w, label, cls = line.split("\t")[:3]
+        c, r = ctx.get(w, ("", ""))
         if (cls in ("typo", "jargon_typo") and " " not in label) or cls == "split":
-            cases.append((w, label.replace("ё", "е"), ctx.get(w, ""), int(counts.get(w, 1))))
+            cases.append((w, label.replace("ё", "е"), c, int(counts.get(w, 1)), r))
         elif cls == "keep":
-            cases.append((w, None, ctx.get(w, ""), int(counts.get(w, 1))))
+            cases.append((w, None, c, int(counts.get(w, 1)), r))
     return cases
 
 
@@ -79,7 +80,7 @@ if __name__ == "__main__":
         lines.append(f"== {name}")
         for t in THRESHOLDS:
             right = wrong = false = split_right = 0
-            for (w, target, _, _), r in res:
+            for (w, target, *_), r in res:
                 acted = r is not None and r[0] != w and r[1] >= t
                 if target:
                     ok = acted and r[0].replace("ё", "е") == target

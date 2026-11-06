@@ -65,16 +65,16 @@ if __name__ == "__main__":
                 continue
             words[(lang, w)] += 1
             if len(ctxs[(lang, w)]) < 3:
-                ctxs[(lang, w)].append(t[max(0, m.start() - 60) : m.start()])
+                ctxs[(lang, w)].append((t[max(0, m.start() - 60) : m.start()], t[m.end() : m.end() + 30]))
     out = [f"сообщений {len(msgs)}, слов {total}, незнакомых {sum(words.values())} ({len(words)} разных)"]
     rows = []
     for (lang, w), n in words.most_common():
         d = dicts[lang]
         cands = d.candidates(w)
+        ctx, right = ctxs[(lang, w)][0]
         if not cands:
-            rows.append((lang, w, n, "", 0.0, "нет кандидатов", ctxs[(lang, w)][0]))
+            rows.append((lang, w, n, "", 0.0, "нет кандидатов", ctx, right))
             continue
-        ctx = ctxs[(lang, w)][0]
         x = torch.zeros((K, L), dtype=torch.long)
         x[0] = torch.tensor(row(ctx, w, w))
         for j, c in enumerate(cands, 1):
@@ -83,8 +83,8 @@ if __name__ == "__main__":
             s = net(x)[: len(cands) + 1]
         p = torch.softmax(s, 0)
         b = int(p.argmax())
-        rows.append((lang, w, n, cands[0], float(p[b]), "оставить" if b == 0 else cands[b - 1], ctx))
-    lines = ["язык\tслово\tраз\tпервый кандидат\tуверенность\tвыбор модели\tконтекст"]
+        rows.append((lang, w, n, cands[0], float(p[b]), "оставить" if b == 0 else cands[b - 1], ctx, right))
+    lines = ["язык\tслово\tраз\tпервый кандидат\tуверенность\tвыбор модели\tконтекст\tсправа"]
     lines += ["\t".join(str(v).replace("\t", " ").replace("\n", " ") for v in r) for r in rows]
     (DATA / "real_words.tsv").write_text("\n".join(lines), encoding="utf-8")
     print("\n".join(out), file=sys.stderr)

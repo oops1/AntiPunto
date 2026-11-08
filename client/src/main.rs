@@ -25,12 +25,9 @@ mod worker;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
 use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL};
-use windows::core::w;
 
 use engine::{Buffer, Ch};
 use keymap::{EN, KEYMAP, OTHER, RU, SPACE};
@@ -394,12 +391,10 @@ fn main() {
         return;
     }
 
+    if !update::hold_single() {
+        return;
+    }
     unsafe {
-        // это же имя ждёт установщик (AppMutex)
-        let _mutex = CreateMutexW(None, false, w!("AntiPunto_single"));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
-            return;
-        }
         settings::load();
         if !cfg.spell {
             // --no-spell: только на этот запуск

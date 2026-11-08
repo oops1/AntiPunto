@@ -117,6 +117,8 @@ struct Worker {
     speller_failed: bool,
     /// Сомнительные слова фразы: окно у курсора держится до конца фразы.
     offers: Vec<Offer>,
+    /// Что сейчас показывает окно: строки по тексту слова.
+    shown: Vec<String>,
     recheck: Option<Recheck>,
     /// Языковая модель грузится в фоне: сборка для NPU занимает десятки секунд.
     lm_loading: Option<Receiver<Result<Lm, String>>>,
@@ -522,6 +524,7 @@ impl Worker {
 
     /// Окно по текущим строкам у курсора; без курсора — не показываем.
     fn show_offers(&mut self) {
+        self.shown = self.offers.iter().map(|o| o.text.clone()).collect();
         if self.offers.is_empty() {
             popup::hide();
             return;
@@ -540,13 +543,13 @@ impl Worker {
         popup::show(rows, caret.rect);
     }
 
-    /// Убрать строки слов, которых в буфере больше нет (стёрли, Enter, клик); true — что-то убрали.
+    /// Убрать строки слов, которых в буфере больше нет (стёрли, Enter, клик);
+    /// true — окно отстало от списка и его надо перерисовать.
     fn sync_offers(&mut self) -> bool {
-        let n = self.offers.len();
         let chars = &self.buf.chars;
         self.offers
             .retain(|o| o.b <= chars.len() && chars[o.a..o.b].iter().map(Ch::render).collect::<String>() == o.text);
-        self.offers.len() != n
+        !self.offers.iter().map(|o| o.text.as_str()).eq(self.shown.iter().map(String::as_str))
     }
 
     /// Выбран вариант i (сквозной номер): заменить слово, хвост напечатать заново.
@@ -605,7 +608,7 @@ impl Worker {
     fn dismiss(&mut self) {
         if !self.offers.is_empty() {
             self.offers.clear();
-            popup::hide();
+            self.show_offers();
         }
     }
 
@@ -907,6 +910,7 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         speller: None,
         speller_failed: false,
         offers: Vec::new(),
+        shown: Vec::new(),
         recheck: None,
         lm_loading: None,
         lm_failed: false,

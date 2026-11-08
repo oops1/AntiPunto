@@ -3,9 +3,12 @@
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicIsize, Ordering::SeqCst};
 
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows::Win32::Networking::WinHttp::*;
 use windows::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
@@ -168,6 +171,32 @@ fn open_page(rel: &Release) {
     }
 }
 
+/// Мьютекс единственного экземпляра; это же имя проверяет установщик (AppMutex).
+static SINGLE: AtomicIsize = AtomicIsize::new(0);
+
+/// Занять место единственного экземпляра; false — программа уже запущена.
+pub fn hold_single() -> bool {
+    unsafe {
+        let Ok(h) = CreateMutexW(None, false, w!("AntiPunto_single")) else { return false };
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            let _ = CloseHandle(h);
+            return false;
+        }
+        SINGLE.store(h.0 as isize, SeqCst);
+        true
+    }
+}
+
+/// Отпустить мьютекс: установщик, увидев его, в тихом режиме просто выходит.
+pub fn release_single() {
+    let h = SINGLE.swap(0, SeqCst);
+    if h != 0 {
+        unsafe {
+            let _ = CloseHandle(HANDLE(h as *mut _));
+        }
+    }
+}
+
 /// Скачать установщик, сверить SHA-256 и запустить его.
 pub fn install(rel: &Release) -> Result<(), String> {
     let (Some(setup_url), Some(sums_url)) = (rel.setup.as_deref(), rel.sums.as_deref()) else {
@@ -191,6 +220,8 @@ pub fn install(rel: &Release) -> Result<(), String> {
     }
     let path = std::env::temp_dir().join(name);
     std::fs::write(&path, &data).map_err(|e| e.to_string())?;
+    // с загруженной моделью программа завершается не мгновенно — мьютекс отпустить заранее
+    release_single();
     let h = unsafe {
         ShellExecuteW(
             None,
@@ -202,6 +233,7 @@ pub fn install(rel: &Release) -> Result<(), String> {
         )
     };
     if (h.0 as isize) <= 32 {
+        hold_single();
         return Err(format!("не удалось запустить установщик ({})", h.0 as isize));
     }
     Ok(())
@@ -210,6 +242,18 @@ pub fn install(rel: &Release) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn single_instance_mutex_is_released_for_the_installer() {
+        if !hold_single() {
+            eprintln!("AntiPunto запущена — мьютекс занят, проверка пропущена");
+            return;
+        }
+        assert!(!hold_single(), "второй захват в том же процессе должен быть отказом");
+        release_single();
+        assert!(hold_single());
+        release_single();
+    }
 
     #[test]
     fn versions() {

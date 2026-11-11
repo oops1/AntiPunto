@@ -304,12 +304,18 @@ fn control(hwnd: HWND, what: usize) {
 }
 
 fn toggle(hwnd: HWND) {
-    ENABLED.fetch_xor(true, SeqCst);
+    let on = !ENABLED.fetch_xor(true, SeqCst);
     // пока было выключено, буфер устарел
     if let Some(tx) = SENDER.get() {
         let _ = tx.send(Event::Mouse);
     }
     refresh(hwnd, true);
+    if !on {
+        notify(
+            "AntiPunto выключена",
+            "Раскладка и опечатки не исправляются. Включить — пункт «Включено» в меню значка.",
+        );
+    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -317,8 +323,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         match msg {
             WM_TRAY => {
                 match (lp.0 & 0xFFFF) as u32 {
-                    WM_LBUTTONUP => toggle(hwnd),
-                    WM_RBUTTONUP | WM_CONTEXTMENU => menu(hwnd),
+                    // выключение — только осознанно, пунктом меню
+                    WM_LBUTTONUP | WM_RBUTTONUP | WM_CONTEXTMENU => menu(hwnd),
                     NIN_BALLOONUSERCLICK => start_install(hwnd),
                     _ => {}
                 }

@@ -137,9 +137,8 @@ impl Buffer {
     fn spans(&self, end: usize) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         let mut s = None;
-        for i in 0..=end {
-            let sp = i == end || self.chars[i].tok == SPACE;
-            match (sp, s) {
+        for (i, c) in self.chars.iter().enumerate().take(end) {
+            match (c.tok == SPACE, s) {
                 (false, None) => s = Some(i),
                 (true, Some(a)) => {
                     out.push((a, i));
@@ -147,6 +146,9 @@ impl Buffer {
                 }
                 _ => {}
             }
+        }
+        if let Some(a) = s {
+            out.push((a, end));
         }
         out
     }

@@ -30,6 +30,11 @@ fn real_short_word(word: &[Ch]) -> bool {
 
 /// Слово для орфографии: (кавычки слева, знаки справа, русское ли).
 pub fn spell_core(text: &[char]) -> Option<(usize, usize, bool)> {
+    spell_core_from(text, 3)
+}
+
+/// То же с нижней границей длины: слова из двух букв проверяет только языковая модель по контексту.
+pub fn spell_core_from(text: &[char], min_len: usize) -> Option<(usize, usize, bool)> {
     let lead = text.iter().take_while(|c| "(\"«'".contains(**c)).count();
     let trail = text.iter().rev().take_while(|c| ".,!?;:)\"»'".contains(**c)).count();
     if lead + trail >= text.len() {
@@ -38,7 +43,7 @@ pub fn spell_core(text: &[char]) -> Option<(usize, usize, bool)> {
     let core = &text[lead..text.len() - trail];
     let ru = core.iter().all(|&c| ('а'..='я').contains(&c) || c == 'ё');
     let en = core.iter().all(|c| c.is_ascii_lowercase());
-    ((3..=20).contains(&core.len()) && (ru || en)).then_some((lead, trail, ru))
+    ((min_len..=20).contains(&core.len()) && (ru || en)).then_some((lead, trail, ru))
 }
 
 #[derive(Clone, Copy)]
@@ -132,9 +137,8 @@ impl Buffer {
     fn spans(&self, end: usize) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         let mut s = None;
-        for i in 0..=end {
-            let sp = i == end || self.chars[i].tok == SPACE;
-            match (sp, s) {
+        for (i, c) in self.chars.iter().enumerate().take(end) {
+            match (c.tok == SPACE, s) {
                 (false, None) => s = Some(i),
                 (true, Some(a)) => {
                     out.push((a, i));
@@ -142,6 +146,9 @@ impl Buffer {
                 }
                 _ => {}
             }
+        }
+        if let Some(a) = s {
+            out.push((a, end));
         }
         out
     }
@@ -263,13 +270,17 @@ impl Buffer {
     /// Последнее законченное слово для орфографии: границы его букв, сами буквы,
     /// контекст слева и язык (true — русский). Только строчные буквы одного алфавита.
     pub fn spell_target(&self) -> Option<(usize, usize, String, String, bool)> {
+        self.spell_target_from(3)
+    }
+
+    pub fn spell_target_from(&self, min_len: usize) -> Option<(usize, usize, String, String, bool)> {
         let mut end = self.chars.len();
         while end > 0 && self.chars[end - 1].tok == SPACE {
             end -= 1;
         }
         let &(a, b) = self.spans(end).last()?;
         let text: Vec<char> = self.chars[a..b].iter().map(Ch::render).collect();
-        let (lead, trail, ru) = spell_core(&text)?;
+        let (lead, trail, ru) = spell_core_from(&text, min_len)?;
         let core: String = text[lead..text.len() - trail].iter().collect();
         let ctx: String = self.chars[..a + lead].iter().map(Ch::render).collect();
         Some((a + lead, b - trail, core, ctx, ru))
@@ -390,6 +401,10 @@ mod tests {
     fn spell_target_skips_capitals_and_short() {
         assert!(typed("я видел Чукалина ", RU).spell_target().is_none());
         assert!(typed("да ", RU).spell_target().is_none());
+        // двухбуквенное — только по явному запросу (перепроверка с языковой моделью)
+        let (_, _, word, _, ru) = typed("скажи оп ", RU).spell_target_from(2).unwrap();
+        assert_eq!((word.as_str(), ru), ("оп", true));
+        assert!(typed("я ", RU).spell_target_from(2).is_none());
     }
 
     #[test]

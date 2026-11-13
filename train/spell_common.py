@@ -15,6 +15,7 @@ from layouts import ROWS
 K = 16  # кандидатов в группе; 0-й — «оставить как есть»
 SPLITS = 3  # разбивок слитного набора среди кандидатов, не больше
 SHORT_FREQ = 8000  # часть разбивки до 3 букв — только частое слово («ко» да, «ка» нет)
+SHORT_FREQ_LOOSE = 1000  # ...а если целое не слово вовсе — порог мягче («до сих»)
 CTX, WLEN, RCTX = 40, 20, 20
 L = CTX + 2 * WLEN + RCTX + 3 + 3  # контекст, SEP, набранное, SEP, кандидат, SEP, справа, 3 признака
 R0 = CTX + 2 * WLEN + 3  # начало правого контекста
@@ -101,31 +102,33 @@ class Dictionary:
         """Частота слова; у разбивки «в чем» — меньшая из частей."""
         return min(self.freq.get(p, 0) for p in w.split(" "))
 
-    def part_ok(self, w: str) -> bool:
+    def part_ok(self, w: str, loose: bool = False) -> bool:
         if len(w) == 1:
             return w in self.single
-        return len(w) > 3 or self.freq.get(w, 0) >= SHORT_FREQ
+        return len(w) > 3 or self.freq.get(w, 0) >= (SHORT_FREQ_LOOSE if loose else SHORT_FREQ)
 
-    def part(self, p: str) -> list[tuple[str, int]]:
+    def part(self, p: str, loose: bool = False) -> list[tuple[str, int]]:
         """Часть разбивки: само слово (0 правок) или два самых частых в одной правке."""
         if p in self.freq:
-            return [(p, 0)] if self.part_ok(p) else []
+            return [(p, 0)] if self.part_ok(p, loose) else []
         if len(p) < 3:
             return []
         found: set[str] = set()
         self.near(p, found)
-        best = sorted((-self.freq[w], w) for w in found if len(w) > 1 and self.part_ok(w) and osa(p, w) == 1)
+        best = sorted((-self.freq[w], w) for w in found if len(w) > 1 and self.part_ok(w, loose) and osa(p, w) == 1)
         return [(w, 1) for _, w in best[:2]]
 
     def splits(self, typed: str) -> set[str]:
-        """Пропущенный пробел: «вчем» → «в чем»; пробел мог стать соседней буквой («приветькак»)."""
+        """Пропущенный пробел: «вчем» → «в чем»; пробел мог стать соседней буквой («приветькак»).
+        Целое не слово — короткие части пропускаем с мягким порогом частоты."""
+        loose = typed not in self.freq
         out = set()
         for i in range(1, len(typed)):
             for skip in (0, 1):
                 if skip and (i + 1 >= len(typed) or typed[i] not in self.space_keys):
                     continue
-                rights = self.part(typed[i + skip :])
-                for lw, le in self.part(typed[:i]) if rights else ():
+                rights = self.part(typed[i + skip :], loose)
+                for lw, le in self.part(typed[:i], loose) if rights else ():
                     for rw, re_ in rights:
                         if le + re_ + skip <= 2:
                             out.add(f"{lw} {rw}")

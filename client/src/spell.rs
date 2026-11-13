@@ -48,6 +48,8 @@ const SPACE_EN: &str = "xcvbnm";
 const SPLITS: usize = 3;
 /// Часть разбивки до 3 букв — только частое слово.
 const SHORT_FREQ: u32 = 8000;
+/// ...а если целое не слово вовсе — порог мягче («до сих»).
+const SHORT_FREQ_LOOSE: u32 = 1000;
 
 /// FNV-1a по символам, без символа skip (для удалений без копирования).
 fn fnv_skip(s: &[char], skip: usize) -> u32 {
@@ -63,6 +65,18 @@ fn fnv_skip(s: &[char], skip: usize) -> u32 {
 
 fn fnv(s: &[char]) -> u32 {
     fnv_skip(s, usize::MAX)
+}
+
+/// Набрано «-тся», а среди кандидатов «-ться» (или наоборот).
+fn reflexive_pair(typed: &str, cands: &[String]) -> bool {
+    let other = if let Some(s) = typed.strip_suffix("ться") {
+        format!("{s}тся")
+    } else if let Some(s) = typed.strip_suffix("тся") {
+        format!("{s}ться")
+    } else {
+        return false;
+    };
+    cands.contains(&other)
 }
 
 /// Все строки в одной правке: удаление, перестановка, замена, вставка (как edits1 в Python).
@@ -208,19 +222,19 @@ impl Dict {
         w.split(' ').map(|p| self.id(p).map_or(0, |i| self.freq[i as usize])).min().unwrap_or(0)
     }
 
-    fn part_ok(&self, w: &[char], f: u32) -> bool {
+    fn part_ok(&self, w: &[char], f: u32, loose: bool) -> bool {
         match w.len() {
             1 => self.single.contains(&w[0]),
-            2 | 3 => f >= SHORT_FREQ,
+            2 | 3 => f >= if loose { SHORT_FREQ_LOOSE } else { SHORT_FREQ },
             _ => true,
         }
     }
 
     /// Часть разбивки: само слово (0 правок) или два самых частых в одной правке (как part в Python).
-    fn part(&self, p: &[char]) -> Vec<(u32, usize)> {
+    fn part(&self, p: &[char], loose: bool) -> Vec<(u32, usize)> {
         let s: String = p.iter().collect();
         if let Some(i) = self.id(&s) {
-            return if self.part_ok(p, self.freq[i as usize]) { vec![(i, 0)] } else { Vec::new() };
+            return if self.part_ok(p, self.freq[i as usize], loose) { vec![(i, 0)] } else { Vec::new() };
         }
         if p.len() < 3 {
             return Vec::new();
@@ -235,7 +249,7 @@ impl Dict {
                 let w = self.word(i);
                 let wc: Vec<char> = w.chars().collect();
                 let f = self.freq[i as usize];
-                (wc.len() > 1 && self.part_ok(&wc, f) && osa(p, &wc) == 1).then_some((-(f as i64), w, i))
+                (wc.len() > 1 && self.part_ok(&wc, f, loose) && osa(p, &wc) == 1).then_some((-(f as i64), w, i))
             })
             .collect();
         best.sort();
@@ -243,18 +257,18 @@ impl Dict {
     }
 
     /// Пропущенный пробел: «вчем» → «в чем»; пробел мог стать соседней буквой («приветькак»).
-    fn splits(&self, t: &[char]) -> Vec<String> {
+    fn splits(&self, t: &[char], loose: bool) -> Vec<String> {
         let mut out = Vec::new();
         for i in 1..t.len() {
             for skip in 0..2 {
                 if skip == 1 && (i + 1 >= t.len() || !self.space_keys.contains(&t[i])) {
                     continue;
                 }
-                let rights = self.part(&t[i + skip..]);
+                let rights = self.part(&t[i + skip..], loose);
                 if rights.is_empty() {
                     continue;
                 }
-                for (l, le) in self.part(&t[..i]) {
+                for (l, le) in self.part(&t[..i], loose) {
                     for &(r, re) in &rights {
                         if le + re + skip <= 2 {
                             out.push(format!("{} {}", self.word(l), self.word(r)));
@@ -279,6 +293,11 @@ impl Dict {
 
     /// Словарные слова в пределах 2 правок и до SPLITS разбивок: (расстояние, −частота, слово), лучшие первыми.
     pub fn candidates(&self, typed: &str) -> Vec<String> {
+        self.candidates_opt(typed, true)
+    }
+
+    /// loose — незнакомое слово разбивать и на редкие короткие части (решать их по силам только языковой модели).
+    pub fn candidates_opt(&self, typed: &str, loose: bool) -> Vec<String> {
         let t: Vec<char> = typed.chars().collect();
         let mut found = Vec::new();
         self.near(&t, &mut found);
@@ -299,8 +318,9 @@ impl Dict {
             .collect();
         words.sort();
         // разбивка — это ещё и вставленный пробел: ей допускаем на правку больше
+        // целое не слово — короткие части с мягким порогом частоты
         let mut parts: Vec<(usize, i64, String)> = self
-            .splits(&t)
+            .splits(&t, loose && !in_dict)
             .into_iter()
             .map(|s| (osa(&t, &s.chars().collect::<Vec<_>>()), -(self.freq_of(&s) as i64), s))
             .filter(|&(d, _, _)| d <= 3)
@@ -437,15 +457,17 @@ impl Speller {
         if !in_dict && self.known.as_ref().is_some_and(|k| k.contains(typed)) {
             return Ok(None);
         }
-        let cands = d.candidates(typed);
+        let cands = d.candidates_opt(typed, self.lm.is_some());
         if cands.is_empty() {
             return Ok(None);
         }
         let mut probs = Self::score(d, &mut self.model, ctx, typed, &cands)?;
         let opts: Vec<&str> = std::iter::once(typed).chain(cands.iter().map(String::as_str)).collect();
         let mut mixed = false;
+        // -тся/-ться: ранжировщик слова не различает, решает только контекст
+        let pair = in_dict && reflexive_pair(typed, &cands);
         if ru
-            && (!in_dict || probs[0] < LM_DICT_GATE)
+            && (!in_dict || probs[0] < LM_DICT_GATE || pair)
             && let Some(lm) = self.lm.as_mut()
             && let Some(sc) = lm.score(ctx, &opts, right)?
         {
@@ -518,6 +540,27 @@ mod tests {
             n += 1;
         }
         assert!(n >= 50, "мало примеров: {n}");
+    }
+
+    /// Целое не слово — разбивка допускает редкую короткую часть («сих»); у словарного слова порог прежний.
+    #[test]
+    fn loose_split_only_for_unknown_word() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let ru = Dict::load(&root.join("../models/spell_ru.tsv"), true).unwrap();
+        assert!(ru.candidates("досих").iter().any(|c| c == "до сих"), "{:?}", ru.candidates("досих"));
+        assert!(!ru.contains("досих"));
+        // обычный порог для той же части строже
+        let sih: Vec<char> = "сих".chars().collect();
+        assert!(ru.part_ok(&sih, 7247, true) && !ru.part_ok(&sih, 7247, false));
+    }
+
+    #[test]
+    fn reflexive_pair_detects_tsya() {
+        let c = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(reflexive_pair("обновится", &c(&["обновился", "обновиться"])));
+        assert!(reflexive_pair("учиться", &c(&["учится"])));
+        assert!(!reflexive_pair("обновится", &c(&["обновился"])));
+        assert!(!reflexive_pair("стол", &c(&["стул"])));
     }
 
     /// Ошибка, ставшая другим словом, правится по тексту вокруг — только с языковой моделью.

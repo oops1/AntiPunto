@@ -190,10 +190,17 @@ fn ranktest(c: &Config, path: &str) -> Result<(), String> {
         let (word, ctx, right) = (f.next().unwrap_or(""), f.next().unwrap_or(""), f.next().unwrap_or(""));
         let ru = word.chars().any(|ch| ('а'..='я').contains(&ch) || ch == 'ё');
         let (mut out, mut stage, mut conf) = ("-".to_string(), 0, 0f32);
+        // как в резиденте: двухбуквенное на границе слова не трогаем, только по следующему слову
+        let short = word.chars().count() < 3;
+        if short && (sp.lm.is_none() || !ru || right.trim().is_empty()) {
+            n += 1;
+            println!("{word}\t-\t0\t0.0000");
+            continue;
+        }
         if let Some(r) = sp.rank(ctx, word, "", ru)? {
             mixed += r.lm as u32;
             let (w, p) = &r.items[0];
-            if w != word && *p >= sp.threshold_for(r.in_dict, r.lm) {
+            if !short && w != word && *p >= sp.threshold_for(r.in_dict, r.lm) {
                 (out, stage, conf) = (w.clone(), 1, *p);
             } else if sp.lm.is_some()
                 && ru

@@ -737,6 +737,20 @@ impl Worker {
             Some(c) if spell.is_none() => Some(Recheck { a: c.a, b: c.b, word: c.word.clone(), ru: c.ru }),
             _ => None,
         };
+        // двухбуквенное («оп» → «по») на границе не трогаем: решит языковая модель по следующему слову
+        if checked.is_none() && self.speller.as_ref().is_some_and(|s| s.lm.is_some()) {
+            let mut sim = self.buf.clone();
+            if let Some(p) = &plan {
+                sim.apply(p.clone());
+            }
+            if let Some((a, b, word, _, true)) = sim.spell_target_from(2)
+                && word.chars().count() == 2
+                && !self.lists.ignore.contains(&word)
+                && !self.lists.force.contains(&word)
+            {
+                self.recheck = Some(Recheck { a, b, word, ru: true });
+            }
+        }
         // слово после автоправки могло стать длиннее
         let mut offer = checked.filter(|_| offer_ok).map(|c| {
             let b = spell.as_ref().map_or(c.b, |s| c.a + s.2.chars().count());

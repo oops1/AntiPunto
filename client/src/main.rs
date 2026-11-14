@@ -26,7 +26,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::channel;
 
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CAPITAL};
 use windows::Win32::UI::WindowsAndMessaging::{SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL};
 
 use engine::{Buffer, Ch};
@@ -410,9 +409,8 @@ fn main() {
         tray::set_status("загрузка модели…".into());
         let (tx, rx) = channel();
         let _ = hook::SENDER.set(tx);
-        let caps = GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0;
         let update_check = cfg.update_check;
-        std::thread::spawn(move || worker::run(cfg, rx, caps));
+        std::thread::spawn(move || worker::run(cfg, rx));
 
         let hinst = GetModuleHandleW(None).unwrap_or_default();
         let kb = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook::kb_proc), Some(hinst.into()), 0);

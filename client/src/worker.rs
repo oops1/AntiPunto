@@ -30,8 +30,6 @@ use crate::{Config, input, lmstore, load_lm, load_model, load_speller, settings}
 
 #[derive(Default)]
 struct Mods {
-    shift_l: bool,
-    shift_r: bool,
     ctrl_l: bool,
     ctrl_r: bool,
     alt_l: bool,
@@ -41,9 +39,6 @@ struct Mods {
 }
 
 impl Mods {
-    fn shift(&self) -> bool {
-        self.shift_l || self.shift_r
-    }
     fn command(&self) -> bool {
         self.ctrl_l || self.ctrl_r || self.alt_l || self.alt_r || self.win_l || self.win_r
     }
@@ -101,7 +96,6 @@ struct Worker {
     memory: Memory,
     buf: Buffer,
     mods: Mods,
-    caps: bool,
     hwnd: isize,
     proc_name: String,
     excluded: bool,
@@ -178,15 +172,12 @@ impl Worker {
             self.rctrl_tap = None;
         }
         match VIRTUAL_KEY(k.vk) {
-            VK_LSHIFT => self.mods.shift_l = down,
-            VK_RSHIFT => self.mods.shift_r = down,
             VK_LCONTROL => self.mods.ctrl_l = down,
             VK_RCONTROL => self.mods.ctrl_r = down,
             VK_LMENU => self.mods.alt_l = down,
             VK_RMENU => self.mods.alt_r = down,
             VK_LWIN => self.mods.win_l = down,
             VK_RWIN => self.mods.win_r = down,
-            VK_CAPITAL if down => self.caps = !self.caps,
             _ => {}
         }
         double
@@ -201,7 +192,7 @@ impl Worker {
             return None;
         }
         let idx = KEYMAP.key_index(k.scan)?;
-        Some(Ch::new(KEYMAP.token(idx, self.mods.shift(), self.caps, lay), lay, '\0'))
+        Some(Ch::new(KEYMAP.token(idx, k.shift, k.caps, lay), lay, '\0'))
     }
 
     fn handle(&mut self, ev: Event, rx: &Receiver<Event>, pending: &mut VecDeque<Event>) {
@@ -880,7 +871,7 @@ impl Worker {
     }
 }
 
-pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
+pub fn run(cfg: Config, rx: Receiver<Event>) {
     let t0 = std::time::Instant::now();
     let model = match load_model(&cfg) {
         Ok(m) => m,
@@ -911,7 +902,6 @@ pub fn run(cfg: Config, rx: Receiver<Event>, caps: bool) {
         memory,
         buf: Buffer::default(),
         mods: Mods::default(),
-        caps,
         hwnd: 0,
         proc_name: String::new(),
         excluded: false,

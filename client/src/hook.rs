@@ -6,8 +6,8 @@ use std::sync::mpsc::Sender;
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyboardLayout, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_LCONTROL, VK_LMENU,
-    VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
+    GetAsyncKeyState, GetKeyState, GetKeyboardLayout, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_LCONTROL,
+    VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GUITHREADINFO, GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, HC_ACTION,
@@ -36,6 +36,9 @@ pub struct Key {
     pub ext: bool,
     pub lay: Option<u8>,
     pub hwnd: isize,
+    /// Shift и Caps Lock в момент нажатия: от них регистр буквы.
+    pub shift: bool,
+    pub caps: bool,
     /// Проглочено хуком: воспроизвести после правки.
     pub deferred: bool,
     /// Enter/Tab проглочен до проверки слова.
@@ -144,6 +147,8 @@ pub unsafe extern "system" fn kb_proc(code: i32, wp: WPARAM, lp: LPARAM) -> LRES
                         ext: k.flags.0 & LLKHF_EXTENDED.0 != 0,
                         lay,
                         hwnd: hwnd.0 as isize,
+                        shift: held(VK_SHIFT),
+                        caps: GetKeyState(VK_CAPITAL.0 as i32) & 1 != 0,
                         deferred,
                         boundary,
                         undo,

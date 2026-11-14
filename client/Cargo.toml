@@ -1,6 +1,6 @@
 [package]
 name = "antipunto"
-version = "0.7.5"
+version = "0.7.6"
 edition = "2024"
 description = "Переключатель раскладки RU/EN по смыслу фразы на локальной нейросети"
 repository = "https://github.com/oops1/AntiPunto"
